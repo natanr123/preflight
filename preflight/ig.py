@@ -20,12 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "secrets" / "ig.env"
 
 PROFILE_FIELDS = "id,username,name,biography,followers_count,follows_count,media_count,website"
-#: No thumbnail_url/media_url here: the budget that runs out is the app's
-#: `total_time` (measured: 19% vs 5% call_count after ~15 calls), and those
-#: signed CDN urls expire within days anyway. They are fetched later, only
-#: for the posts that make it into the dataset.
+#: thumbnail_url (a Reel's cover) is fetched with everything else: the
+#: fine-tune needs the picture, and Business Discovery cannot read a single
+#: post afterwards, so fetching it later means fetching every page again. The
+#: signed url expires within days, so covers are downloaded soon after.
+#: media_url (the video) stays out: the budget that runs out is the app's
+#: `total_time` (measured: 19% vs 5% call_count after ~15 calls with both urls).
 MEDIA_FIELDS = ("id,media_product_type,media_type,timestamp,caption,like_count,comments_count,"
-                "view_count,permalink")
+                "view_count,permalink,thumbnail_url")
 #: Measured 2026-10-27: the nested media edge accepts 100.
 PAGE_SIZE = 100
 
