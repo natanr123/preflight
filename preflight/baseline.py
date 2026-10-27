@@ -4,8 +4,8 @@
 
 **Why.** Fine-tuning a 30B model is worth its GPU bill only if it beats these
 numbers, and if none of them beats a coin flip the plan needs rethinking before
-any money is spent. What a Reel looks like, probably the strongest signal, is
-not here yet: the crawl skips thumbnails, and the fine-tune adds them.
+any money is spent. `--covers` adds what the Reel looks like, as CLIP
+embeddings of its cover (`preflight.embed`), on the Reels that have one.
 
 **Scores.** ROC AUC, where 0.5 is a coin flip and 1.0 is perfect, for two
 questions: did the Reel beat its account's median, and did it reach twice it.
@@ -32,6 +32,7 @@ from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from preflight.dataset import OUT as DATASET
+from preflight.embed import load_embeddings
 
 RESULTS = DATASET.parent / "baseline.json"
 #: The laptop is shared: left alone, scikit-learn took all 24 cores (load 43).
@@ -93,6 +94,25 @@ def both(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
 MODELS = {"caption + timing": caption_and_timing, "caption words": caption_words, "both": both}
 
 
+def cover_models(vectors: dict[str, np.ndarray]) -> dict:
+    """Models over each Reel's CLIP cover embedding."""
+    def matrix(rows: list[dict]) -> np.ndarray:
+        return np.stack([vectors[row["id"]] for row in rows])
+
+    def cover(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
+        scaler = StandardScaler()
+        # 512 dimensions against a few thousand Reels: regularise hard.
+        model = LogisticRegression(C=0.05, max_iter=2000).fit(scaler.fit_transform(matrix(train)), y)
+        return model.predict_proba(scaler.transform(matrix(test)))[:, 1]
+
+    def cover_and_caption(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
+        # Averaging two models, rather than one over both, keeps the dense
+        # image features from drowning out the sparse words.
+        return (cover(train, test, y) + caption_words(train, test, y)) / 2
+
+    return {"cover (CLIP)": cover, "cover + caption words": cover_and_caption}
+
+
 def new_accounts(rows: list[dict], model, target) -> list[float]:
     y = np.array([target(row) for row in rows])
     groups = [row["username"] for row in rows]
@@ -125,17 +145,23 @@ def streak(rows: list[dict], target) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--all-languages", action="store_true", help="keep non-English captions too")
+    parser.add_argument("--covers", action="store_true", help="only Reels with a cover, plus image models")
     args = parser.parse_args()
 
     rows = [json.loads(line) for line in DATASET.open()]
     if not args.all_languages:
         rows = [row for row in rows if row["language"] in ("en", "und")]
+    models = dict(MODELS)
+    if args.covers:
+        vectors = load_embeddings()
+        rows = [row for row in rows if row["id"] in vectors]
+        models |= cover_models(vectors)
     print(f"{len(rows)} Reels from {len({row['username'] for row in rows})} accounts; "
           + "; ".join(f"{name}: {np.mean([target(row) for row in rows]):.0%}" for name, target in TARGETS.items()))
 
     results = {}
     with threadpool_limits(limits=THREADS):
-        for name, model in MODELS.items():
+        for name, model in models.items():
             results[name] = {}
             for target_name, target in TARGETS.items():
                 folds = new_accounts(rows, model, target)
@@ -143,11 +169,11 @@ def main() -> int:
                                               "newer_reels": newer_reels(rows, model, target)}
     results["recent streak (reference)"] = {target_name: {"all": streak(rows, target)}
                                             for target_name, target in TARGETS.items()}
-    RESULTS.write_text(json.dumps(results, indent=2))
+    (RESULTS.with_name("baseline_covers.json") if args.covers else RESULTS).write_text(json.dumps(results, indent=2))
 
     print(f"\n{'ROC AUC, 0.5 = coin flip':<28}" + "".join(f"{name:<24}" for name in TARGETS))
     print(f"{'':<28}" + f"{'new accounts  newer':<24}" * len(TARGETS))
-    for name in MODELS:
+    for name in models:
         print(f"{name:<28}" + "".join(
             f"{cell['new_accounts']:.3f} ±{cell['sd']:.2f}   {cell['newer_reels']:.3f}    "
             for cell in results[name].values()))
