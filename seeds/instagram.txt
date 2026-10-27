@@ -1,0 +1,183 @@
+# Seed accounts for the Business Discovery crawl, across niches.
+# Mostly large accounts: the crawl snowballs from their @mentions to mid-size
+# creators. Names that are personal, renamed or wrong just come back not_found.
+
+# Instagram's own curators: their captions credit many small creators
+creators
+instagramforbusiness
+design
+
+# Food
+tasty
+foodnetwork
+bonappetitmag
+nytcooking
+delish
+seriouseats
+halfbakedharvest
+minimalistbaker
+budgetbytes
+feelgoodfoodie
+joshuaweissman
+nickdigiovanni
+thefeedfeed
+smittenkitchen
+gordongram
+jamieoliver
+sallysbakingaddiction
+pinchofyum
+recipetineats
+
+# Fitness
+gymshark
+blogilates
+kayla_itsines
+jeffnippard
+nike
+lululemon
+onepeloton
+underarmour
+adidas
+puma
+
+# Travel and nature
+natgeo
+natgeotravel
+beautifuldestinations
+lonelyplanet
+cntraveler
+travelandleisure
+airbnb
+bbcearth
+discovery
+
+# Tech
+mkbhd
+verge
+techcrunch
+wired
+samsungmobile
+unboxtherapy
+ijustine
+adobe
+canva
+procreate
+figma
+notionhq
+
+# Science and education
+nasa
+nasawebb
+ted
+smithsonian
+sciencechannel
+kurzgesagt
+spacex
+
+# Entertainment and comedy
+netflix
+hbomax
+nbcsnl
+comedycentral
+9gag
+pubity
+ladbible
+unilad
+complex
+buzzfeed
+
+# Beauty and fashion
+sephora
+glossier
+fentybeauty
+hudabeauty
+nyxcosmetics
+zara
+hm
+voguemagazine
+elleusa
+refinery29
+
+# Pets and animals
+thedodo
+tuckerbudzyn
+jiffpom
+nala_cat
+barked
+
+# DIY and home
+5.min.crafts
+ikeausa
+apartmenttherapy
+marthastewart
+archdigest
+dezeen
+thisoldhouse
+
+# Kids, family, books, animation (Book Popup's own world)
+pixar
+disney
+disneyjunior
+cartoonnetwork
+nickelodeon
+sesamestreet
+pbskids
+scholastic
+penguinrandomhouse
+barnesandnoble
+bookofthemonth
+audible
+lego
+dreamworks
+crunchyroll
+goodreads
+
+# Music
+spotify
+billboard
+rollingstone
+genius
+applemusic
+pitchfork
+colorsxstudios
+
+# Sports
+espn
+nba
+nfl
+championsleague
+redbull
+gopro
+bleacherreport
+houseofhighlights
+f1
+ufc
+
+# Cars
+bmw
+porsche
+teslamotors
+topgear
+ferrari
+
+# Art, design, culture
+behance
+artsy
+themuseumofmodernart
+thisiscolossal
+designmilk
+hypebeast
+highsnobiety
+
+# Media
+insider
+time
+vice
+
+# Creators
+mrbeast
+khaby00
+zachking
+brentrivera
+jayshetty
+garyvee
