@@ -57,7 +57,7 @@ NO_SPEECH = 0.6
 #: ffmpeg's scene score (0 to 1) above which a frame starts a new shot.
 CUT = 0.3
 #: Raised whenever FORM or PROMPT changes, so older descriptions can be told apart.
-VERSION = 2
+VERSION = 3
 TIMEOUT = 300
 
 FORM = {
@@ -103,7 +103,8 @@ PROMPT = """\
 Fill in a form about the first {seconds} seconds of an Instagram Reel, for a dataset. Describe only what is there.
 
 The attached image is a contact sheet of {frames} frames from those seconds, one every half second, left to right
-and then top to bottom, each with its time above it.
+and then top to bottom. The black band above each frame, with its time in yellow, was added for you: it is not part
+of the Reel, so leave it out of the form.
 
 You cannot hear the Reel, so software listened and measured for you:
 {measured}
