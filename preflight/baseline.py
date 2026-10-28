@@ -41,6 +41,8 @@ from preflight.embed import load_embeddings
 RESULTS = DATASET.parent / "baseline.json"
 #: The laptop is shared: left alone, scikit-learn took all 24 cores (load 43).
 THREADS = 4
+#: Reads the written-down openings (`--descriptions`); fastembed, CPU only.
+TEXT_MODEL = "BAAI/bge-small-en-v1.5"
 NUMERIC = ("caption_chars", "words", "hashtags", "lines", "emojis", "question", "cta",
            "hour_utc", "weekday", "gap_hours", "followers", "media_count")
 #: Counts that spread over orders of magnitude; logs keep the linear model sane.
@@ -130,8 +132,23 @@ def description_models(forms: dict[str, dict]) -> dict:
     def opening_and_caption(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
         return (opening(None)(train, test, y) + caption_words(train, test, y)) / 2
 
+    # Word counts barely read a description; a small sentence model reads its
+    # meaning (measured on the first 1,017: 0.548 against 0.534, beats median).
+    from fastembed import TextEmbedding  # slow to import; only these models need it
+
+    reader = TextEmbedding(TEXT_MODEL, cache_dir=str(DATASET.parent / "models"), threads=THREADS)
+    ids = list(forms)
+    vectors = dict(zip(ids, reader.embed([as_text(forms[media_id]) for media_id in ids], batch_size=64)))
+
+    def embedded(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
+        scaler = StandardScaler()
+        matrix = lambda rows: np.stack([vectors[row["id"]] for row in rows])  # noqa: E731
+        model = LogisticRegression(C=0.1, max_iter=2000).fit(scaler.fit_transform(matrix(train)), y)
+        return model.predict_proba(scaler.transform(matrix(test)))[:, 1]
+
     return {"opening 1 s": opening(1), "opening 3 s": opening(3), "opening 5 s": opening(5),
-            "opening + overview": opening(None), "opening + caption words": opening_and_caption}
+            "opening + overview": opening(None), "opening + caption words": opening_and_caption,
+            "opening, embedded": embedded}
 
 
 def new_accounts(rows: list[dict], model, target) -> list[float]:
