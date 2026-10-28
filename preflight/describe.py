@@ -18,7 +18,7 @@ openings of one, three and five seconds can be compared from one description:
 **Who describes.** A CLI agent on the user's own subscriptions, `codex exec`
 or `claude -p`, so a description costs allowance rather than money; Codex is
 the cheaper of the two (the user, 2026-10-28). Muse Spark can take over once
-the Meta API key is in, and it hears for itself.
+the Meta API credit is in.
 """
 import argparse
 import base64
@@ -57,6 +57,8 @@ STAMP = 40
 WHISPER, THREADS, RATE = "small", 4, 16_000
 #: Whisper's own threshold for a segment that is probably not speech.
 NO_SPEECH = 0.6
+#: Raised whenever `listen` changes, so `prepare` hears older openings again.
+LISTENED = 2
 #: ffmpeg's scene score (0 to 1) above which a frame starts a new shot.
 CUT = 0.3
 #: Raised whenever FORM or PROMPT changes, so older descriptions can be told apart.
@@ -175,15 +177,19 @@ def listen(video: Path) -> dict:
                          capture_output=True, timeout=120).stdout
     audio = np.frombuffer(raw, np.float32)
     if not len(audio):
-        return {"sound_track": False, "language": None, "words": [], "loudness": []}
+        return {"listened": LISTENED, "sound_track": False, "language": None, "words": [], "loudness": []}
     loudness = [round(20 * math.log10(float(np.sqrt(np.mean(audio[start:start + RATE] ** 2))) + 1e-9), 1)
                 for start in range(0, len(audio), RATE)]
     with _LISTENING:  # one model, one transcription at a time
         segments, info = speech_model().transcribe(audio, word_timestamps=True, vad_filter=True)
-        # Whisper hears words in music: a lone "You" at no-speech 0.8 (measured).
+        # Whisper hears words in music: a lone "You" at no-speech 0.8 (measured). Sung lyrics
+        # score as doubtful ("I always take the long road, I always take you back": 0.8), so
+        # only doubtful segments of one or two words go.
         words = [{"start": round(word.start, 2), "word": word.word.strip()}
-                 for segment in segments if segment.no_speech_prob <= NO_SPEECH for word in segment.words]
-    return {"sound_track": True, "language": info.language if words else None, "words": words, "loudness": loudness}
+                 for segment in segments if segment.no_speech_prob <= NO_SPEECH or len(segment.words) > 2
+                 for word in segment.words]
+    return {"listened": LISTENED, "sound_track": True, "language": info.language if words else None,
+            "words": words, "loudness": loudness}
 
 
 def cuts(video: Path) -> list[float]:
@@ -194,19 +200,23 @@ def cuts(video: Path) -> list[float]:
 
 
 def prepare(media_id: str) -> dict:
-    """The opening's contact sheet and measurements, made once and kept."""
-    facts_path = OPENINGS / f"{media_id}.json"
+    """The opening's contact sheet and measurements, made once and kept. An
+    opening heard by an older `listen` is heard again; its frames are kept."""
+    facts_path, video = OPENINGS / f"{media_id}.json", video_path(media_id)
     if facts_path.exists():
-        return json.loads(facts_path.read_text())
-    OPENINGS.mkdir(parents=True, exist_ok=True)
-    video = video_path(media_id)
-    with tempfile.TemporaryDirectory(prefix="preflight-frames-") as work:
-        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", str(SECONDS), "-i", str(video),
-                        "-vf", f"fps={FRAMES_PER_SECOND}", "-q:v", "2", f"{work}/%02d.jpg"],
-                       check=True, capture_output=True, timeout=120)
-        frames = sorted(Path(work).glob("*.jpg"))
-        contact_sheet(frames, OPENINGS / f"{media_id}.jpg")
-    facts = {"frames": len(frames), **listen(video), "cuts": cuts(video)}
+        facts = json.loads(facts_path.read_text())
+        if facts.get("listened") == LISTENED or not video.exists():
+            return facts
+        facts |= listen(video)
+    else:
+        OPENINGS.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="preflight-frames-") as work:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", str(SECONDS), "-i", str(video),
+                            "-vf", f"fps={FRAMES_PER_SECOND}", "-q:v", "2", f"{work}/%02d.jpg"],
+                           check=True, capture_output=True, timeout=120)
+            frames = sorted(Path(work).glob("*.jpg"))
+            contact_sheet(frames, OPENINGS / f"{media_id}.jpg")
+        facts = {"frames": len(frames), **listen(video), "cuts": cuts(video)}
     partial = facts_path.with_suffix(".part")
     partial.write_text(json.dumps(facts, ensure_ascii=False))
     partial.rename(facts_path)  # its existence means the sheet is complete too
@@ -264,40 +274,48 @@ def call(argv: list[str], text: str, cwd: str) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
-def codex(model: str, effort: str, prompt: str, sheet: Path) -> tuple[dict, dict]:
+def codex(model: str, effort: str, prompt: str, schema: dict, image: Path | None) -> tuple[dict, dict]:
     with tempfile.TemporaryDirectory(prefix="preflight-codex-") as work:
-        schema, answer = Path(work) / "form.schema.json", Path(work) / "form.json"
-        schema.write_text(json.dumps(FORM))
+        schema_path, answer = Path(work) / "answer.schema.json", Path(work) / "answer.json"
+        schema_path.write_text(json.dumps(schema))
         # Without the user's config: it would start their MCP servers on every call.
         argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
                 "--sandbox", "read-only", "-C", work, "-m", model, "-c", f'model_reasoning_effort="{effort}"',
-                "--output-schema", str(schema), "-o", str(answer), "--json", "--color", "never", "-i", str(sheet)]
-        done = call(argv, prompt, work)
+                "--output-schema", str(schema_path), "-o", str(answer), "--json", "--color", "never"]
+        done = call(argv + (["-i", str(image)] if image else []), prompt, work)
         usage = next((event["usage"] for event in reversed(events(done.stdout)) if "usage" in event), {})
         if not answer.exists() or not answer.read_text().strip():
             raise failure(done.stdout + done.stderr)
         return json.loads(answer.read_text()), usage
 
 
-def claude(model: str, effort: str, prompt: str, sheet: Path) -> tuple[dict, dict]:
-    image = base64.b64encode(sheet.read_bytes()).decode()
-    message = {"type": "user", "message": {"role": "user", "content": [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image}},
-        {"type": "text", "text": prompt}]}}
+def claude(model: str, effort: str, prompt: str, schema: dict, image: Path | None) -> tuple[dict, dict]:
+    content = [{"type": "text", "text": prompt}]
+    if image:
+        content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                       "data": base64.b64encode(image.read_bytes()).decode()}})
+    message = {"type": "user", "message": {"role": "user", "content": content}}
     # The image comes inline, so no tools are needed and one turn answers.
     argv = ["claude", "-p", "--model", model, "--effort", effort, "--restricted", "--strict-mcp-config",
             "--tools", "", "--no-session-persistence", "--input-format", "stream-json",
-            "--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(FORM)]
+            "--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(schema)]
     with tempfile.TemporaryDirectory(prefix="preflight-claude-") as work:
         done = call(argv, json.dumps(message) + "\n", work)
     result = next((event for event in reversed(events(done.stdout)) if event.get("type") == "result"), None)
     if not result or result.get("is_error"):
         raise failure(json.dumps(result) if result else done.stdout + done.stderr)
-    form = result.get("structured_output") or json.loads(result["result"])
-    return form, {**(result.get("usage") or {}), "cost_usd": result.get("total_cost_usd")}
+    answer = result.get("structured_output") or json.loads(result["result"])
+    return answer, {**(result.get("usage") or {}), "cost_usd": result.get("total_cost_usd")}
 
 
-DESCRIBERS = {"codex": codex, "claude": claude}
+AGENTS = {"codex": codex, "claude": claude}
+
+
+def ask(agent: str, prompt: str, schema: dict, image: Path | None = None) -> tuple[dict, dict]:
+    """One answer in `schema` from a CLI agent named like codex:gpt-6-luna, or
+    codex:gpt-6-luna:medium for more reasoning than the default "low"."""
+    kind, model, *effort = agent.split(":")
+    return AGENTS[kind](model, effort[0] if effort else "low", prompt, schema, image)
 
 
 def describe(describer: str, media_id: str) -> dict:
@@ -305,10 +323,9 @@ def describe(describer: str, media_id: str) -> dict:
     seconds = math.ceil(facts["frames"] / FRAMES_PER_SECOND)
     prompt = PROMPT.format(seconds=seconds, frames=facts["frames"], measured=measured(facts),
                            last=f"{seconds - 1}-{seconds} s")
-    kind, model, *effort = describer.split(":")  # codex:gpt-6-luna, or codex:gpt-6-luna:medium
     started = time.time()
-    form, usage = DESCRIBERS[kind](model, effort[0] if effort else "low", prompt, OPENINGS / f"{media_id}.jpg")
-    record = {"id": media_id, "describer": describer, "version": VERSION,
+    form, usage = ask(describer, prompt, FORM, OPENINGS / f"{media_id}.jpg")
+    record = {"id": media_id, "describer": describer, "version": VERSION, "listened": facts.get("listened", 1),
               "seconds": round(time.time() - started, 1), "usage": usage, "form": form}
     out = description_path(describer, media_id)
     out.parent.mkdir(parents=True, exist_ok=True)
