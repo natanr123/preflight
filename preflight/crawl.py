@@ -2,6 +2,7 @@
 
     uv run python -m preflight.crawl seed seeds/instagram.txt
     uv run python -m preflight.crawl run [--max-calls N] [--hours H]
+    uv run python -m preflight.crawl refresh [--max-calls N] [--hours H]
     uv run python -m preflight.crawl stats
 
 **Where accounts come from.** Business Discovery needs a username; searching
@@ -15,6 +16,11 @@ bios keep theirs.
 the follower band get more pages, until the posts are older than
 `HISTORY_DAYS`, because labelling a Reel against its own account's median
 needs that account's other Reels from the same months.
+
+**Reading again.** `refresh` reads the labelled accounts again, those with
+the most Reels lacking a video first: video links expire about a day and a
+half after they are read, and accounts crawled before the crawl asked for
+them have none.
 
 **Rate.** The token belongs to bookpopup's live app, and Graph rate limits are
 shared with its real publishing. The crawl pauses at `PAUSE_AT` percent of
@@ -30,6 +36,7 @@ from pathlib import Path
 
 from preflight.ig import BusinessDiscovery, GraphError, NotFound, RateLimited, TokenInvalid
 from preflight.store import Store
+from preflight.videos import missing
 
 #: Accounts in this follower band get their history paginated.
 BAND = (5_000, 2_000_000)
@@ -95,17 +102,10 @@ class Crawler:
         else:
             time.sleep(SLOW_DELAY if usage >= SLOW_AT else BASE_DELAY)
 
-    def crawl_one(self, account) -> None:
-        username = account["username"]
-        try:
-            page = self.fetch(username)
-        except NotFound:
-            self.store.mark(username, "not_found")
-            return
-        except GraphError as failure:
-            self.store.mark(username, "error", json.dumps(failure.error)[:500])
-            return
-
+    def read(self, username: str) -> tuple[dict, list[dict], int, int]:
+        """Save the account's first page, and its history if it is in the band.
+        Returns the profile, the posts, the pages read and the last usage."""
+        page = self.fetch(username)
         media, profile = list(page.media), page.profile
         self.store.save_page(username, profile, page.media)
         followers = profile.get("followers_count") or 0
@@ -120,6 +120,18 @@ class Crawler:
             self.store.save_page(username, page.profile, page.media)
             media += page.media
             pages, after = pages + 1, page.after
+        return profile, media, pages, page.usage
+
+    def crawl_one(self, account) -> None:
+        username = account["username"]
+        try:
+            profile, media, pages, usage = self.read(username)
+        except NotFound:
+            self.store.mark(username, "not_found")
+            return
+        except GraphError as failure:
+            self.store.mark(username, "error", json.dumps(failure.error)[:500])
+            return
 
         if account["depth"] < MAX_DEPTH:
             added = self.store.enqueue(mentions(profile.get("biography"), username),
@@ -128,8 +140,8 @@ class Crawler:
             added = 0
         self.store.mark(username, "done")
         reels = [item for item in media if item.get("media_product_type") == "REELS"]
-        log(f"{username:<28} followers={followers:>11,} posts={len(media):>3} reels={len(reels):>3} "
-            f"pages={pages} +queued={added:<3} usage={page.usage}% calls={self.calls}")
+        log(f"{username:<28} followers={profile.get('followers_count') or 0:>11,} posts={len(media):>3} "
+            f"reels={len(reels):>3} pages={pages} +queued={added:<3} usage={usage}% calls={self.calls}")
 
     def run(self) -> None:
         while self.budget_left():
@@ -138,6 +150,22 @@ class Crawler:
                 log("queue empty")
                 return
             self.crawl_one(account)
+
+    def refresh(self, usernames: list[str]) -> None:
+        """Read crawled accounts again, for links that expired or were not yet
+        asked for. Their posts' counts are read afresh too."""
+        for username in usernames:
+            if not self.budget_left():
+                return
+            try:
+                _, media, pages, usage = self.read(username)
+            except (NotFound, GraphError) as failure:
+                log(f"{username:<28} not read again: {failure}")
+                continue
+            reels = [item for item in media if item.get("media_product_type") == "REELS"]
+            videos = sum(1 for item in reels if item.get("media_url"))
+            log(f"{username:<28} reels={len(reels):>3} with video={videos:>3} pages={pages} "
+                f"usage={usage}% calls={self.calls}")
 
 
 def log(message: str) -> None:
@@ -149,9 +177,10 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     seed = commands.add_parser("seed")
     seed.add_argument("file", type=Path)
-    run = commands.add_parser("run")
-    run.add_argument("--max-calls", type=int, default=500)
-    run.add_argument("--hours", type=float, default=12)
+    for name in ("run", "refresh"):
+        command = commands.add_parser(name)
+        command.add_argument("--max-calls", type=int, default=500)
+        command.add_argument("--hours", type=float, default=12)
     commands.add_parser("stats")
     args = parser.parse_args()
 
@@ -162,10 +191,14 @@ def main() -> int:
                                    for line in args.file.read_text().splitlines()))
         names = [name for name in names if name]
         print(f"queued {store.enqueue(names, 0, 'seed')} new seeds of {len(names)}")
-    elif args.command == "run":
+    elif args.command in ("run", "refresh"):
         crawler = Crawler(store, BusinessDiscovery(), args.max_calls, time.time() + args.hours * 3600)
         try:
-            crawler.run()
+            if args.command == "run":
+                crawler.run()
+            else:
+                # Most videos missing first.
+                crawler.refresh([username for username, _ in missing().most_common()])
         except TokenInvalid as invalid:
             log(f"token rejected ({invalid}); reconnect Facebook in bookpopup, then rerun")
             return 1

@@ -20,14 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "secrets" / "ig.env"
 
 PROFILE_FIELDS = "id,username,name,biography,followers_count,follows_count,media_count,website"
-#: thumbnail_url (a Reel's cover) is fetched with everything else: the
-#: fine-tune needs the picture, and Business Discovery cannot read a single
-#: post afterwards, so fetching it later means fetching every page again. The
-#: signed url expires within days, so covers are downloaded soon after.
-#: media_url (the video) stays out: the budget that runs out is the app's
-#: `total_time` (measured: 19% vs 5% call_count after ~15 calls with both urls).
+#: media_url (the video) is fetched with everything else: the model works on
+#: the video, and Business Discovery cannot read a single post afterwards, so
+#: fetching it later means fetching every page again. The signed url expires
+#: about a day and a half later (its `oe` parameter), so `preflight.videos`
+#: downloads soon after. Instagram leaves it out of Reels it holds rights
+#: claims on: measured, khaby00 97 of 98 and zachking 100 of 100 came with
+#: one, verge 0 of 312 and nickelodeon 0 of 67.
+#: thumbnail_url (the cover) is no longer asked for: covers are not a model
+#: input for now, and the budget that runs out is the app's `total_time`
+#: (measured: 19% vs 5% call_count after ~15 calls with both urls).
 MEDIA_FIELDS = ("id,media_product_type,media_type,timestamp,caption,like_count,comments_count,"
-                "view_count,permalink,thumbnail_url")
+                "view_count,permalink,media_url")
 #: Measured 2026-10-27: the nested media edge accepts 100.
 PAGE_SIZE = 100
 
