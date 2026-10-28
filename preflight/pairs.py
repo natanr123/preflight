@@ -26,7 +26,6 @@ import argparse
 import json
 import math
 import random
-import subprocess
 import sys
 import threading
 import time
@@ -35,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from preflight.dataset import OUT as DATASET
-from preflight.describe import DescriberFailed, OutOfAllowance, as_text, ask, load_descriptions, log
+from preflight.describe import FAILURES, STOPS, as_text, ask, load_descriptions, log
 
 PAIRS = DATASET.parent / "pairs"
 #: The better Reel got at least this many times its partner's views, each
@@ -159,11 +158,11 @@ def run(judge: str, describer: str, captions: bool, workers: int, limit: int | N
             return "left for later"
         try:
             return "right" if judge_pair(judge, describer, captions, pair, forms, rows)["right"] else "wrong"
-        except OutOfAllowance as limit_reached:
+        except STOPS as limit:
             stop.set()
-            log(f"out of allowance, stopping: {limit_reached}")
+            log(f"stopping: {type(limit).__name__}: {limit}")
             return "out of allowance"
-        except (DescriberFailed, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
+        except FAILURES as error:
             log(f"{pair['a']}-{pair['b']}: {type(error).__name__}: {error}")
             return "failed"
 

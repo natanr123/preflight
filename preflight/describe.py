@@ -40,9 +40,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from preflight import meta
 from preflight.dataset import age_slope, label
 from preflight.store import DEFAULT_PATH
 from preflight.videos import labelled_reels, video_path
@@ -308,12 +310,17 @@ def claude(model: str, effort: str, prompt: str, schema: dict, image: Path | Non
     return answer, {**(result.get("usage") or {}), "cost_usd": result.get("total_cost_usd")}
 
 
-AGENTS = {"codex": codex, "claude": claude}
+AGENTS = {"codex": codex, "claude": claude, "meta": meta.respond}
+#: What ends a whole run (no allowance or budget left), and what fails one Reel.
+STOPS = (OutOfAllowance, meta.OverBudget, meta.NotArmed)
+FAILURES = (DescriberFailed, meta.MetaFailed, httpx.HTTPError, subprocess.SubprocessError, OSError, ValueError,
+            KeyError)
 
 
 def ask(agent: str, prompt: str, schema: dict, image: Path | None = None) -> tuple[dict, dict]:
-    """One answer in `schema` from a CLI agent named like codex:gpt-6-luna, or
-    codex:gpt-6-luna:medium for more reasoning than the default "low"."""
+    """One answer in `schema` from an agent named like codex:gpt-6-luna or
+    meta:muse-spark-1.3, with :medium and so on for more reasoning than the
+    default "low"."""
     kind, model, *effort = agent.split(":")
     return AGENTS[kind](model, effort[0] if effort else "low", prompt, schema, image)
 
@@ -381,7 +388,7 @@ def pilot(n: int, describers: list[str]) -> None:
         def one(row, describer=describer):
             try:
                 return describe(describer, row["id"])
-            except (DescriberFailed, OutOfAllowance, subprocess.SubprocessError, ValueError) as error:
+            except STOPS + FAILURES as error:
                 log(f"{describer} {row['id']}: {type(error).__name__}: {error}")
                 return None
         with ThreadPoolExecutor(3) as pool:
@@ -421,11 +428,11 @@ def run(describer: str, workers: int, deadline: float, sample: int | None) -> No
         try:
             describe(describer, media_id)
             return "described"
-        except OutOfAllowance as limit:
+        except STOPS as limit:
             stop.set()
-            log(f"out of allowance, stopping: {limit}")
+            log(f"stopping: {type(limit).__name__}: {limit}")
             return "out of allowance"
-        except (DescriberFailed, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
+        except FAILURES as error:
             log(f"{media_id}: {type(error).__name__}: {error}")
             return "failed"
 
