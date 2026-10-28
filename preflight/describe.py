@@ -23,6 +23,7 @@ the Meta API key is in, and it hears for itself.
 import argparse
 import base64
 import functools
+import hashlib
 import json
 import math
 import os
@@ -386,12 +387,13 @@ def pilot(n: int, describers: list[str]) -> None:
 
 
 def run(describer: str, workers: int, deadline: float, sample: int | None) -> None:
-    """Every labelled Reel with a video, in one fixed shuffled order: a run cut
-    short by the allowance still covers every account, and `--sample N` gives
-    each describer the same first N Reels to compare on."""
-    todo = sorted(reel["id"] for reels in labelled_reels().values() for reel in reels
-                  if video_path(reel["id"]).exists())
-    random.Random(0).shuffle(todo)
+    """Every labelled Reel with a video, in an order fixed by a hash of its id:
+    a run cut short by the allowance still covers every account, and `--sample
+    N` gives each describer the same first N Reels to compare on, even after
+    more videos arrive (a shuffle would reorder everything when one is added)."""
+    todo = sorted((reel["id"] for reels in labelled_reels().values() for reel in reels
+                   if video_path(reel["id"]).exists()),
+                  key=lambda media_id: hashlib.sha256(media_id.encode()).hexdigest())
     todo = [media_id for media_id in todo[:sample] if not description_path(describer, media_id).exists()]
     log(f"{len(todo)} openings to describe with {describer}")
     stop, counts = threading.Event(), Counter()
