@@ -25,8 +25,10 @@ import base64
 import functools
 import json
 import math
+import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -246,6 +248,21 @@ def failure(output: str) -> Exception:
     return OutOfAllowance(said) if LIMIT.search(said) else DescriberFailed(said)
 
 
+def call(argv: list[str], text: str, cwd: str) -> subprocess.CompletedProcess:
+    """Run a CLI agent in its own process group, and kill the whole group on
+    timeout: killing only `codex` (a node wrapper) left its native binary
+    running on (seen 2026-10-28)."""
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, cwd=cwd, start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(text, timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def codex(model: str, effort: str, prompt: str, sheet: Path) -> tuple[dict, dict]:
     with tempfile.TemporaryDirectory(prefix="preflight-codex-") as work:
         schema, answer = Path(work) / "form.schema.json", Path(work) / "form.json"
@@ -254,7 +271,7 @@ def codex(model: str, effort: str, prompt: str, sheet: Path) -> tuple[dict, dict
         argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
                 "--sandbox", "read-only", "-C", work, "-m", model, "-c", f'model_reasoning_effort="{effort}"',
                 "--output-schema", str(schema), "-o", str(answer), "--json", "--color", "never", "-i", str(sheet)]
-        done = subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=TIMEOUT)
+        done = call(argv, prompt, work)
         usage = next((event["usage"] for event in reversed(events(done.stdout)) if "usage" in event), {})
         if not answer.exists() or not answer.read_text().strip():
             raise failure(done.stdout + done.stderr)
@@ -271,8 +288,7 @@ def claude(model: str, effort: str, prompt: str, sheet: Path) -> tuple[dict, dic
             "--tools", "", "--no-session-persistence", "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(FORM)]
     with tempfile.TemporaryDirectory(prefix="preflight-claude-") as work:
-        done = subprocess.run(argv, input=json.dumps(message) + "\n", capture_output=True, text=True,
-                              timeout=TIMEOUT, cwd=work)
+        done = call(argv, json.dumps(message) + "\n", work)
     result = next((event for event in reversed(events(done.stdout)) if event.get("type") == "result"), None)
     if not result or result.get("is_error"):
         raise failure(json.dumps(result) if result else done.stdout + done.stderr)
