@@ -6,6 +6,9 @@
 numbers, and if none of them beats a coin flip the plan needs rethinking before
 any money is spent. `--covers` adds what the Reel looks like, as CLIP
 embeddings of its cover (`preflight.embed`), on the Reels that have one.
+`--descriptions <describer>` adds what the opening shows and says, as
+`preflight.describe` wrote it down: its first one, three and five seconds, and
+all of it with the overview, on the Reels that have a description.
 
 **Scores.** ROC AUC, where 0.5 is a coin flip and 1.0 is perfect, for two
 questions: did the Reel beat its account's median, and did it reach twice it.
@@ -32,6 +35,7 @@ from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from preflight.dataset import OUT as DATASET
+from preflight.describe import as_text, load_descriptions
 from preflight.embed import load_embeddings
 
 RESULTS = DATASET.parent / "baseline.json"
@@ -113,6 +117,23 @@ def cover_models(vectors: dict[str, np.ndarray]) -> dict:
     return {"cover (CLIP)": cover, "cover + caption words": cover_and_caption}
 
 
+def description_models(forms: dict[str, dict]) -> dict:
+    """Models over the written-down opening, at several lengths."""
+    def opening(seconds: int | None):
+        def model(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
+            words = TfidfVectorizer(ngram_range=(1, 2), min_df=3, sublinear_tf=True)
+            texts = lambda rows: [as_text(forms[row["id"]], seconds) for row in rows]  # noqa: E731
+            fitted = LogisticRegression(max_iter=2000).fit(words.fit_transform(texts(train)), y)
+            return fitted.predict_proba(words.transform(texts(test)))[:, 1]
+        return model
+
+    def opening_and_caption(train: list[dict], test: list[dict], y: np.ndarray) -> np.ndarray:
+        return (opening(None)(train, test, y) + caption_words(train, test, y)) / 2
+
+    return {"opening 1 s": opening(1), "opening 3 s": opening(3), "opening 5 s": opening(5),
+            "opening + overview": opening(None), "opening + caption words": opening_and_caption}
+
+
 def new_accounts(rows: list[dict], model, target) -> list[float]:
     y = np.array([target(row) for row in rows])
     groups = [row["username"] for row in rows]
@@ -146,6 +167,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--all-languages", action="store_true", help="keep non-English captions too")
     parser.add_argument("--covers", action="store_true", help="only Reels with a cover, plus image models")
+    parser.add_argument("--descriptions", metavar="DESCRIBER",
+                        help="only described Reels, plus models over their opening (e.g. codex:gpt-6-luna)")
     args = parser.parse_args()
 
     rows = [json.loads(line) for line in DATASET.open()]
@@ -156,6 +179,10 @@ def main() -> int:
         vectors = load_embeddings()
         rows = [row for row in rows if row["id"] in vectors]
         models |= cover_models(vectors)
+    if args.descriptions:
+        forms = load_descriptions(args.descriptions)
+        rows = [row for row in rows if row["id"] in forms]
+        models |= description_models(forms)
     print(f"{len(rows)} Reels from {len({row['username'] for row in rows})} accounts; "
           + "; ".join(f"{name}: {np.mean([target(row) for row in rows]):.0%}" for name, target in TARGETS.items()))
 
@@ -169,7 +196,10 @@ def main() -> int:
                                               "newer_reels": newer_reels(rows, model, target)}
     results["recent streak (reference)"] = {target_name: {"all": streak(rows, target)}
                                             for target_name, target in TARGETS.items()}
-    (RESULTS.with_name("baseline_covers.json") if args.covers else RESULTS).write_text(json.dumps(results, indent=2))
+    out = RESULTS.with_name("baseline_covers.json") if args.covers else RESULTS
+    if args.descriptions:
+        out = RESULTS.with_name(f"baseline_{args.descriptions.replace(':', '-')}.json")
+    out.write_text(json.dumps(results, indent=2))
 
     print(f"\n{'ROC AUC, 0.5 = coin flip':<28}" + "".join(f"{name:<24}" for name in TARGETS))
     print(f"{'':<28}" + f"{'new accounts  newer':<24}" * len(TARGETS))
