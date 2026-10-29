@@ -2,6 +2,7 @@
 
     uv run python -m preflight.describe pilot [--n 12] [--with codex:gpt-6-luna claude:sonnet]
     uv run python -m preflight.describe run [--with codex:gpt-6-luna[:effort]] [--workers 3] [--hours 10]
+    uv run python -m preflight.describe prepare [--workers 3] [--hours 10]
 
 **What the describer gets.** The Reel's first five seconds as ten frames, one
 every half second, on one contact sheet stamped with their times
@@ -410,15 +411,48 @@ def pilot(n: int, describers: list[str]) -> None:
     log(f"side by side: {DESCRIPTIONS / 'pilot.md'}")
 
 
-def run(describer: str, workers: int, deadline: float, sample: int | None) -> None:
+def in_order() -> list[str]:
     """Every labelled Reel with a video, in an order fixed by a hash of its id:
     a run cut short by the allowance still covers every account, and `--sample
     N` gives each describer the same first N Reels to compare on, even after
     more videos arrive (a shuffle would reorder everything when one is added)."""
-    todo = sorted((reel["id"] for reels in labelled_reels().values() for reel in reels
+    return sorted((reel["id"] for reels in labelled_reels().values() for reel in reels
                    if video_path(reel["id"]).exists()),
                   key=lambda media_id: hashlib.sha256(media_id.encode()).hexdigest())
-    todo = [media_id for media_id in todo[:sample] if not description_path(describer, media_id).exists()]
+
+
+def prepare_all(workers: int, deadline: float) -> None:
+    """Every opening's sheet and sound made ahead, here on the CPU, so a
+    describer that costs money only has to read them, and every one is heard
+    by the latest `listen`."""
+    def heard(media_id: str) -> bool:
+        facts = OPENINGS / f"{media_id}.json"
+        return facts.exists() and json.loads(facts.read_text()).get("listened") == LISTENED
+
+    todo = [media_id for media_id in in_order() if not heard(media_id)]
+    log(f"{len(todo)} openings to prepare")
+    counts = Counter()
+
+    def one(media_id: str) -> str:
+        if time.time() > deadline:
+            return "left for later"
+        try:
+            prepare(media_id)
+            return "ready"
+        except FAILURES as error:
+            log(f"{media_id}: {type(error).__name__}: {error}")
+            return "failed"
+
+    with ThreadPoolExecutor(workers) as pool:
+        for count, result in enumerate(pool.map(one, todo), 1):
+            counts[result] += 1
+            if count % 250 == 0:
+                log(f"{count}/{len(todo)} {dict(counts)}")
+    log(f"done: {dict(counts)}")
+
+
+def run(describer: str, workers: int, deadline: float, sample: int | None) -> None:
+    todo = [media_id for media_id in in_order()[:sample] if not description_path(describer, media_id).exists()]
     log(f"{len(todo)} openings to describe with {describer}")
     stop, counts = threading.Event(), Counter()
 
@@ -455,10 +489,15 @@ def main() -> int:
     full.add_argument("--workers", type=int, default=3)
     full.add_argument("--hours", type=float, default=10)
     full.add_argument("--sample", type=int, help="only the first N Reels of the fixed order")
+    ahead = commands.add_parser("prepare")
+    ahead.add_argument("--workers", type=int, default=3)
+    ahead.add_argument("--hours", type=float, default=10)
     args = parser.parse_args()
 
     if args.command == "pilot":
         pilot(args.n, args.describers)
+    elif args.command == "prepare":
+        prepare_all(args.workers, time.time() + args.hours * 3600)
     else:
         run(args.describer, args.workers, time.time() + args.hours * 3600, args.sample)
     return 0
