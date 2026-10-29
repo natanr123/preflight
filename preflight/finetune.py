@@ -32,9 +32,13 @@ image = (modal.Image.debian_slim(python_version="3.12")
          .env({"HF_HOME": "/vol/hf"})
          .add_local_python_source("preflight"))
 
-MODELS = {"glimmer": ("meta-models/Muse-Glimmer-30B", "L40S"),
+MODELS = {"glimmer": "meta-models/Muse-Glimmer-30B",
           # Same path at a hundredth of the size, to check the plumbing for cents.
-          "tiny": ("Qwen/Qwen2.5-0.5B-Instruct", "L4")}
+          "tiny": "Qwen/Qwen2.5-0.5B-Instruct"}
+#: GPUs a job may run on, cheapest first; Modal takes the first with capacity
+#: (L4s were all busy on 2026-10-29, and a job just waited). Glimmer's QLoRA
+#: needs about 28 GB. A list is only allowed here, not in `with_options`.
+GPUS = ["L40S", "A100-40GB", "A100-80GB"]
 #: The template's own default is "Reasoning strength: high"; naming it here
 #: keeps that directive out, and the answer is trained to come without reasoning.
 SYSTEM = ("You read the opening seconds of an Instagram Reel, written down second by second, and say whether the "
@@ -49,13 +53,17 @@ def messages(text: str) -> list[dict]:
 
 def load(model_id: str):
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import (AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer,
+                              BitsAndBytesConfig)
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
     # Both bfloat16 settings: without them Glimmer's vision path loads in byte dtype (Meta's guide).
     quantized = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                                    bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_storage=torch.bfloat16)
-    model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=quantized, dtype=torch.bfloat16,
-                                                 device_map="auto")
+    # transformers 5.21 knows Glimmer only as image-text-to-text (checked 2026-10-29); it reads text alone fine.
+    causal = AutoConfig.from_pretrained(model_id).model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+    loader = AutoModelForCausalLM if causal else AutoModelForImageTextToText
+    model = loader.from_pretrained(model_id, quantization_config=quantized, dtype=torch.bfloat16, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -70,7 +78,7 @@ def fetch(model_id: str) -> None:
     volume.commit()
 
 
-@app.function(image=image, volumes={"/vol": volume}, gpu="L4", memory=32768, timeout=6 * 3600)
+@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=6 * 3600)
 def train(run: str, model_id: str, examples: list[dict], epochs: float) -> dict:
     from datasets import Dataset
     from peft import LoraConfig
@@ -98,7 +106,7 @@ def train(run: str, model_id: str, examples: list[dict], epochs: float) -> dict:
             "log": [entry for entry in trainer.state.log_history if "loss" in entry]}
 
 
-@app.function(image=image, volumes={"/vol": volume}, gpu="L4", memory=32768, timeout=2 * 3600)
+@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=2 * 3600)
 def score(run: str | None, model_id: str, texts: list[str]) -> list[float]:
     """P(Yes) for each opening, from the logits of the first answer token."""
     import torch
@@ -158,20 +166,20 @@ def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "
     from preflight.dataset import OUT as DATASET
     from preflight.pairs import wilson
 
-    model_id, gpu = MODELS[model]
+    model_id = MODELS[model]
     train_rows, test_rows, pairs = examples(describer, captions)
     if run == "smoke" or limit:
         train_rows, test_rows, pairs = train_rows[:limit or 64], test_rows[:limit or 32], pairs[:16]
     print(f"{len(train_rows)} training Reels, {len(test_rows)} held out from {len({r['account'] for r in test_rows})} "
-          f"accounts, {len(pairs)} pairs; {model_id} on {gpu}")
+          f"accounts, {len(pairs)} pairs; {model_id}")
     fetch.remote(model_id)
-    trained = train.with_options(gpu=gpu).remote(run, model_id, train_rows, epochs)
+    trained = train.remote(run, model_id, train_rows, epochs)
     print(f"trained: loss {trained['train_loss']:.3f}, {trained['steps']} steps, {trained['minutes']} min")
 
     needed = {row["id"]: row for row in test_rows}
     texts = {row["id"]: row["text"] for row in examples(describer, captions)[1]}  # every held-out Reel
     ids = sorted(needed | {pair[side]: None for pair in pairs for side in ("a", "b")})
-    probability = dict(zip(ids, score.with_options(gpu=gpu).remote(run, model_id, [texts[i] for i in ids])))
+    probability = dict(zip(ids, score.remote(run, model_id, [texts[i] for i in ids])))
 
     truth = {row["id"]: row["answer"] == "Yes" for row in test_rows}
     auc = roc_auc_score([truth[i] for i in truth], [probability[i] for i in truth]) if len(set(truth.values())) > 1 \
