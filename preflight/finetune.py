@@ -2,6 +2,7 @@
 
     uv run modal run -m preflight.finetune --run smoke                       # the whole path on a tiny model
     uv run modal run -m preflight.finetune --run pairs-luna --describer codex:gpt-6-luna --model glimmer
+    uv run modal run -m preflight.finetune --run pairs-luna-3ep --describer codex:gpt-6-luna --model glimmer --epochs 3 --no-baseline
 
 **What it learns.** By default (`--task pairwise`), the pair test's own
 question: two Reels from one account, written down second by second, in; "A"
@@ -99,44 +100,12 @@ def fetch(model_id: str) -> None:
     volume.commit()
 
 
-@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=6 * 3600)
-def train(run: str, model_id: str, task: str, examples: list[dict], epochs: float, learning_rate: float) -> dict:
-    from datasets import Dataset
-    from peft import LoraConfig
-    from trl import SFTConfig, SFTTrainer
-
-    started = time.time()
-    model, tokenizer = load(model_id)
-    targets = sorted({name for name, _ in model.named_modules()
-                      if name.split(".")[-1] in PROJECTIONS and "vision" not in name})
-    data = Dataset.from_list([{"prompt": messages(task, example["text"]),
-                               "completion": [{"role": "assistant", "content": example["answer"]}]}
-                              for example in examples])
-    config = SFTConfig(output_dir="/tmp/out", num_train_epochs=epochs, per_device_train_batch_size=4,
-                       gradient_accumulation_steps=4, learning_rate=learning_rate, lr_scheduler_type="cosine",
-                       warmup_steps=10, bf16=True, gradient_checkpointing=True,
-                       gradient_checkpointing_kwargs={"use_reentrant": False}, max_length=3072,
-                       completion_only_loss=True, logging_steps=10, save_strategy="no", report_to="none")
-    lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules=targets, task_type="CAUSAL_LM")
-    trainer = SFTTrainer(model=model, args=config, train_dataset=data, processing_class=tokenizer, peft_config=lora)
-    result = trainer.train()
-    trainer.save_model(f"{ADAPTERS}/{run}")
-    volume.commit()
-    return {"train_loss": result.training_loss, "steps": result.global_step, "examples": len(examples),
-            "minutes": round((time.time() - started) / 60, 1),
-            "log": [entry for entry in trainer.state.log_history if "loss" in entry]}
-
-
-@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=2 * 3600)
-def score(run: str | None, model_id: str, task: str, texts: list[str]) -> list[float]:
+def chances(model, tokenizer, task: str, texts: list[str]) -> list[float]:
     """The probability of the first answer ("Yes", or "A") for each text, from
-    its first token; without `run`, Glimmer as it comes."""
+    its first token. Leaves the model training if it was."""
     import torch
-    from peft import PeftModel
 
-    model, tokenizer = load(model_id)
-    if run:
-        model = PeftModel.from_pretrained(model, f"{ADAPTERS}/{run}")
+    training, padding = model.training, tokenizer.padding_side
     model.eval()
     tokenizer.padding_side = "left"
     # Where the two answers part, right after the template's header for the reply.
@@ -153,14 +122,74 @@ def score(run: str | None, model_id: str, task: str, texts: list[str]) -> list[f
     hook = output_layer.register_forward_hook(lambda _, inputs, __: seen.update(last=inputs[0][:, -1, :].float()))
     prompts = [tokenizer.apply_chat_template(messages(task, text), tokenize=False) + header for text in texts]
     scores = []
-    with torch.no_grad():
-        for start in range(0, len(prompts), 8):
-            batch = tokenizer(prompts[start:start + 8], return_tensors="pt", padding=True,
-                              add_special_tokens=False).to(model.device)
-            model(**batch, logits_to_keep=1)
-            scores += torch.softmax(seen["last"] @ head.T, dim=-1)[:, 0].tolist()
-    hook.remove()
+    try:
+        with torch.no_grad():
+            for start in range(0, len(prompts), 8):
+                batch = tokenizer(prompts[start:start + 8], return_tensors="pt", padding=True,
+                                  add_special_tokens=False).to(model.device)
+                model(**batch, logits_to_keep=1)
+                scores += torch.softmax(seen["last"] @ head.T, dim=-1)[:, 0].tolist()
+    finally:
+        hook.remove()
+        tokenizer.padding_side = padding
+        model.train(training)
     return scores
+
+
+@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=6 * 3600)
+def train(run: str, model_id: str, task: str, examples: list[dict], epochs: float, learning_rate: float,
+          checks: list[str] | None = None) -> dict:
+    """With `checks`, the adapter so far is kept after every epoch (as
+    `<run>-epoch<n>`) and scores those texts, so one run shows how many epochs
+    are worth it."""
+    from datasets import Dataset
+    from peft import LoraConfig
+    from transformers import TrainerCallback
+    from trl import SFTConfig, SFTTrainer
+
+    started = time.time()
+    model, tokenizer = load(model_id)
+    each_epoch = []
+
+    class EveryEpoch(TrainerCallback):
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            epoch = round(state.epoch)
+            model.save_pretrained(f"{ADAPTERS}/{run}-epoch{epoch}")
+            volume.commit()
+            each_epoch.append({"epoch": epoch, "step": state.global_step,
+                               "probabilities": chances(model, tokenizer, task, checks)})
+            print(f"epoch {epoch} scored, {(time.time() - started) / 60:.0f} min in", flush=True)
+
+    targets = sorted({name for name, _ in model.named_modules()
+                      if name.split(".")[-1] in PROJECTIONS and "vision" not in name})
+    data = Dataset.from_list([{"prompt": messages(task, example["text"]),
+                               "completion": [{"role": "assistant", "content": example["answer"]}]}
+                              for example in examples])
+    config = SFTConfig(output_dir="/tmp/out", num_train_epochs=epochs, per_device_train_batch_size=4,
+                       gradient_accumulation_steps=4, learning_rate=learning_rate, lr_scheduler_type="cosine",
+                       warmup_steps=10, bf16=True, gradient_checkpointing=True,
+                       gradient_checkpointing_kwargs={"use_reentrant": False}, max_length=3072,
+                       completion_only_loss=True, logging_steps=10, save_strategy="no", report_to="none")
+    lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules=targets, task_type="CAUSAL_LM")
+    trainer = SFTTrainer(model=model, args=config, train_dataset=data, processing_class=tokenizer, peft_config=lora,
+                         callbacks=[EveryEpoch()] if checks else None)
+    result = trainer.train()
+    trainer.save_model(f"{ADAPTERS}/{run}")
+    volume.commit()
+    return {"train_loss": result.training_loss, "steps": result.global_step, "examples": len(examples),
+            "minutes": round((time.time() - started) / 60, 1),
+            "log": [entry for entry in trainer.state.log_history if "loss" in entry], "each_epoch": each_epoch}
+
+
+@app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=2 * 3600)
+def score(run: str | None, model_id: str, task: str, texts: list[str]) -> list[float]:
+    """`chances` for each text; without `run`, Glimmer as it comes."""
+    from peft import PeftModel
+
+    model, tokenizer = load(model_id)
+    if run:
+        model = PeftModel.from_pretrained(model, f"{ADAPTERS}/{run}")
+    return chances(model, tokenizer, task, texts)
 
 
 # Local side: the data in, the results out ------------------------------------------------------------------------------
@@ -233,11 +262,12 @@ def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "
     trained = None
     if retrain:  # --no-retrain scores the adapter already saved under this run's name
         fetch.remote(model_id)
-        trained = train.remote(run, model_id, task, train_examples, epochs, learning_rate)
+        # Past one epoch, the held-out texts are scored after each, inside the training run.
+        trained = train.remote(run, model_id, task, train_examples, epochs, learning_rate,
+                               test_texts if epochs > 1 else None)
         print(f"trained: loss {trained['train_loss']:.3f}, {trained['steps']} steps, {trained['minutes']} min")
 
-    def evaluate(adapter: str | None) -> dict:
-        probabilities = score.remote(adapter, model_id, task, test_texts)
+    def judged(probabilities: list[float]) -> dict:
         if task == "pairwise":
             # P(the first-shown Reel is better), averaged over both orders: (P(A | a,b) + P(B | b,a)) / 2.
             chances = [(probabilities[2 * i] + 1 - probabilities[2 * i + 1]) / 2 for i in range(len(test_pairs))]
@@ -254,9 +284,13 @@ def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "
                 "held_out_auc": roc_auc_score(truth, probabilities) if len(set(truth)) > 1 else None,
                 "spread": [min(probabilities), max(probabilities)], "probabilities": by_id}
 
-    results = {"tuned": evaluate(run)}
+    results = {}
+    for seen in (trained or {}).get("each_epoch", []):
+        results[f"epoch {seen['epoch']}"] = judged(seen.pop("probabilities"))
+    results["tuned"] = (list(results.values())[-1] if results
+                        else judged(score.remote(run, model_id, task, test_texts)))
     if baseline:
-        results["as it comes"] = evaluate(None)
+        results["as it comes"] = judged(score.remote(None, model_id, task, test_texts))
     out = DATASET.parent / "finetune" / f"{run}{'' if retrain else '-rescored'}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"run": run, "model": model_id, "task": task, "describer": describer,
