@@ -17,10 +17,10 @@ the follower band get more pages, until the posts are older than
 `HISTORY_DAYS`, because labelling a Reel against its own account's median
 needs that account's other Reels from the same months.
 
-**Reading again.** `refresh` reads the labelled accounts again, those with
-the most Reels lacking a video first: video links expire about a day and a
-half after they are read, and accounts crawled before the crawl asked for
-them have none.
+**Reading again.** `refresh` reads the labelled accounts again whose video
+links expired before the videos were saved, most first: links expire about a
+day and a half after they are read. Reels that never came with a link are
+left alone (see `preflight.videos.missing`).
 
 **Rate.** The token belongs to bookpopup's live app, and Graph rate limits are
 shared with its real publishing. The crawl pauses at `PAUSE_AT` percent of

@@ -57,12 +57,17 @@ def labelled_reels() -> dict[str, list[dict]]:
 
 
 def missing() -> Counter:
-    """How many labelled Reels each account has with neither a video on disk
-    nor a link that still works: the accounts `crawl refresh` reads again."""
+    """How many labelled Reels each account has whose link expired before the
+    video was saved: the accounts `crawl refresh` reads again. Reels that never
+    came with a link are not counted, since reading them again brings none:
+    Instagram leaves it out of Reels it holds rights claims on (see
+    `preflight.ig.MEDIA_FIELDS`). On 2026-10-29 every labelled Reel without a
+    video was one of those, 134 accounts gave none at all, and reading 44 of
+    them again (66 calls) brought almost no new videos."""
     now, counts = datetime.now(timezone.utc), Counter()
     for username, reels in labelled_reels().items():
         for reel in reels:
-            if not video_path(reel["id"]).exists() and not live(reel["media_url"], now):
+            if reel["media_url"] and not live(reel["media_url"], now) and not video_path(reel["id"]).exists():
                 counts[username] += 1
     return counts
 
