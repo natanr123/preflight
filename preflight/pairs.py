@@ -2,7 +2,7 @@
 reads their written-down openings.
 
     uv run python -m preflight.pairs run --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna [--caption]
-                                         [--first-frames]
+                                         [--first-frames] [--sound]
     uv run python -m preflight.pairs report --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna
 
 **Why.** It is the product's question: of two openings, which will do better
@@ -26,6 +26,10 @@ frames, side by side, for what the words may miss of how they look. The
 written-down openings already describe that frame, so it asks whether the
 pixels add anything.
 
+**Sound.** `--sound` adds a line under each opening with what audio models
+measured of its sound (`preflight.sound`): the judges cannot hear, and the
+written-down opening has only the words and how loud each second is.
+
 **Score.** How often the judge picks the Reel that did better, with a 95%
 interval (pairs from one account are not quite independent, so read it as
 approximate); 50% is a coin flip. How often it picks whichever came first shows
@@ -45,6 +49,7 @@ from pathlib import Path
 
 from preflight.dataset import OUT as DATASET
 from preflight.describe import FAILURES, STOPS, as_text, ask, load_descriptions, log
+from preflight.sound import load_sound, sound_line
 from preflight.videos import first_frame, video_path
 
 PAIRS = DATASET.parent / "pairs"
@@ -71,7 +76,7 @@ VERDICT = {
 
 PROMPT = """\
 Two Reels were posted on the same Instagram account. Below is what the first five seconds of each show and say,
-written down by someone who watched them{captions}.{frames}
+written down by someone who watched them{captions}.{frames}{sound}
 
 Which of the two got more views, measured against how this account's Reels usually do? These openings are all you
 have to go on; there is always an answer.
@@ -85,6 +90,7 @@ Reel B
 Answer with the form only.
 """
 FRAMES = " The attached picture shows each one's first frame: Reel A's on the left, Reel B's on the right."
+SOUND = " Under each one, a line says what audio models measured of its sound."
 
 
 def held_out(username: str) -> bool:
@@ -120,8 +126,10 @@ def load_pairs(name: str, rows: dict[str, dict]) -> list[dict]:
     return json.loads(path.read_text())["pairs"]
 
 
-def verdict_path(name: str, judge: str, describer: str, captions: bool, pair: dict, frames: bool = False) -> Path:
-    setup = describer + ("+captions" if captions else "") + ("+first-frames" if frames else "")
+def verdict_path(name: str, judge: str, describer: str, captions: bool, pair: dict, frames: bool = False,
+                 sound: bool = False) -> Path:
+    setup = (describer + ("+captions" if captions else "") + ("+first-frames" if frames else "")
+             + ("+sound" if sound else ""))
     return PAIRS / name / setup.replace(":", "-") / judge.replace(":", "-") / f"{pair['a']}-{pair['b']}.json"
 
 
@@ -147,19 +155,19 @@ def first_frames(name: str, pair: dict) -> Path:
 
 
 def judge_pair(name: str, judge: str, describer: str, captions: bool, pair: dict, forms: dict, rows: dict,
-               frames: bool = False) -> dict:
+               frames: bool = False, sound: bool = False) -> dict:
     def shown(media_id: str) -> str:
         caption = f"\nCaption: {rows[media_id]['caption'] or '(none)'}" if captions else ""
-        return as_text(forms[media_id]) + caption
+        return as_text(forms[media_id]) + caption + (f"\n{sound_line(load_sound(media_id))}" if sound else "")
 
     prompt = PROMPT.format(captions=", and each one's caption" if captions else "", frames=FRAMES if frames else "",
-                           a=shown(pair["a"]), b=shown(pair["b"]))
+                           sound=SOUND if sound else "", a=shown(pair["a"]), b=shown(pair["b"]))
     started = time.time()
     answer, usage = ask(judge, prompt, VERDICT, first_frames(name, pair) if frames else None)
     record = {**pair, "judge": judge, "describer": describer, "captions": captions, "first_frames": frames,
-              "said": answer["better"], "right": answer["better"] == pair["better"], "why": answer["why"],
-              "seconds": round(time.time() - started, 1), "usage": usage}
-    out = verdict_path(name, judge, describer, captions, pair, frames)
+              "sound": sound, "said": answer["better"], "right": answer["better"] == pair["better"],
+              "why": answer["why"], "seconds": round(time.time() - started, 1), "usage": usage}
+    out = verdict_path(name, judge, describer, captions, pair, frames, sound)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, ensure_ascii=False, indent=1))
     return record
@@ -174,8 +182,8 @@ def wilson(right: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return centre - half, centre + half
 
 
-def report(name: str, judge: str, describer: str, captions: bool, frames: bool = False) -> None:
-    folder = verdict_path(name, judge, describer, captions, {"a": "", "b": ""}, frames).parent
+def report(name: str, judge: str, describer: str, captions: bool, frames: bool = False, sound: bool = False) -> None:
+    folder = verdict_path(name, judge, describer, captions, {"a": "", "b": ""}, frames, sound).parent
     records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
     if not records:
         log(f"no verdicts in {folder}")
@@ -183,17 +191,19 @@ def report(name: str, judge: str, describer: str, captions: bool, frames: bool =
     n, right = len(records), sum(record["right"] for record in records)
     low, high = wilson(right, n)
     first = sum(record["said"] == "A" for record in records)
-    log(f"{name}: {judge} reading {describer}{' + captions' if captions else ''}{' + first frames' if frames else ''}: "
+    extras = (" + captions" if captions else "") + (" + first frames" if frames else "") + (" + sound" if sound else "")
+    log(f"{name}: {judge} reading {describer}{extras}: "
         f"picked the better Reel in {right} of {n} pairs = {right / n:.0%} (95%: {low:.0%}-{high:.0%}); "
         f"said A {first / n:.0%} of the time, from {len({record['account'] for record in records})} accounts")
 
 
 def run(name: str, judge: str, describer: str, captions: bool, workers: int, limit: int | None,
-        frames: bool = False) -> None:
+        frames: bool = False, sound: bool = False) -> None:
     rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
     forms = load_descriptions(describer)
-    pairs = [pair for pair in load_pairs(name, rows)[:limit] if pair["a"] in forms and pair["b"] in forms]
-    todo = [pair for pair in pairs if not verdict_path(name, judge, describer, captions, pair, frames).exists()]
+    pairs = [pair for pair in load_pairs(name, rows)[:limit] if pair["a"] in forms and pair["b"] in forms
+             and (not sound or (load_sound(pair["a"]) and load_sound(pair["b"])))]
+    todo = [pair for pair in pairs if not verdict_path(name, judge, describer, captions, pair, frames, sound).exists()]
     log(f"{len(todo)} of {len(pairs)} pairs to judge with {judge}")
     stop, counts = threading.Event(), Counter()
 
@@ -201,7 +211,7 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
         if stop.is_set():
             return "left for later"
         try:
-            record = judge_pair(name, judge, describer, captions, pair, forms, rows, frames)
+            record = judge_pair(name, judge, describer, captions, pair, forms, rows, frames, sound)
             return "right" if record["right"] else "wrong"
         except STOPS as limit:
             stop.set()
@@ -217,7 +227,7 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
             if count % 25 == 0:
                 log(f"{count}/{len(todo)} {dict(counts)}")
     log(f"done: {dict(counts)}")
-    report(name, judge, describer, captions, frames)
+    report(name, judge, describer, captions, frames, sound)
 
 
 def main() -> int:
@@ -228,13 +238,14 @@ def main() -> int:
     parser.add_argument("--describer", default="codex:gpt-6-luna", help="whose descriptions the judge reads")
     parser.add_argument("--caption", dest="captions", action="store_true", help="show each Reel's caption too")
     parser.add_argument("--first-frames", dest="frames", action="store_true", help="show both first frames too")
+    parser.add_argument("--sound", action="store_true", help="add what audio models measured of each sound")
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--limit", type=int, help="only the first N pairs")
     args = parser.parse_args()
     if args.command == "run":
-        run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit, args.frames)
+        run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit, args.frames, args.sound)
     else:
-        report(args.name, args.judge, args.describer, args.captions, args.frames)
+        report(args.name, args.judge, args.describer, args.captions, args.frames, args.sound)
     return 0
 
 
