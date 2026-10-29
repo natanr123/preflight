@@ -192,6 +192,25 @@ def score(run: str | None, model_id: str, task: str, texts: list[str]) -> list[f
     return chances(model, tokenizer, task, texts)
 
 
+@app.cls(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=30 * 60, scaledown_window=10 * 60)
+class Judge:
+    """A pairwise adapter kept loaded, for the demo (`preflight.demo`), once
+    deployed (`modal deploy -m preflight.finetune`). It goes cold after ten idle
+    minutes, and the first call after that waits minutes for Glimmer to load."""
+    run: str = modal.parameter()
+
+    @modal.enter()
+    def start(self):
+        from peft import PeftModel
+
+        model, self.tokenizer = load(MODELS["glimmer"])
+        self.model = PeftModel.from_pretrained(model, f"{ADAPTERS}/{self.run}")
+
+    @modal.method()
+    def rate(self, texts: list[str]) -> list[float]:
+        return chances(self.model, self.tokenizer, "pairwise", texts)
+
+
 # Local side: the data in, the results out ------------------------------------------------------------------------------
 def reel_texts(describer: str, captions: bool) -> tuple[dict[str, str], dict[str, dict]]:
     """Every described Reel's text as the model reads it, and the dataset rows."""

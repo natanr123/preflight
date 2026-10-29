@@ -202,6 +202,18 @@ def cuts(video: Path) -> list[float]:
     return [round(float(stamp), 1) for stamp in re.findall(r"pts_time:([\d.]+)", found)]
 
 
+def opening(video: Path, sheet: Path) -> dict:
+    """A video's first seconds: its frames on a contact sheet at `sheet`, and
+    what is heard and where the shots change."""
+    with tempfile.TemporaryDirectory(prefix="preflight-frames-") as work:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", str(SECONDS), "-i", str(video),
+                        "-vf", f"fps={FRAMES_PER_SECOND}", "-q:v", "2", f"{work}/%02d.jpg"],
+                       check=True, capture_output=True, timeout=120)
+        frames = sorted(Path(work).glob("*.jpg"))
+        contact_sheet(frames, sheet)
+    return {"frames": len(frames), **listen(video), "cuts": cuts(video)}
+
+
 def prepare(media_id: str) -> dict:
     """The opening's contact sheet and measurements, made once and kept. An
     opening heard by an older `listen` is heard again; its frames are kept."""
@@ -213,13 +225,7 @@ def prepare(media_id: str) -> dict:
         facts |= listen(video)
     else:
         OPENINGS.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="preflight-frames-") as work:
-            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", str(SECONDS), "-i", str(video),
-                            "-vf", f"fps={FRAMES_PER_SECOND}", "-q:v", "2", f"{work}/%02d.jpg"],
-                           check=True, capture_output=True, timeout=120)
-            frames = sorted(Path(work).glob("*.jpg"))
-            contact_sheet(frames, OPENINGS / f"{media_id}.jpg")
-        facts = {"frames": len(frames), **listen(video), "cuts": cuts(video)}
+        facts = opening(video, OPENINGS / f"{media_id}.jpg")
     partial = facts_path.with_suffix(".part")
     partial.write_text(json.dumps(facts, ensure_ascii=False))
     partial.rename(facts_path)  # its existence means the sheet is complete too
@@ -326,13 +332,18 @@ def ask(agent: str, prompt: str, schema: dict, image: Path | None = None) -> tup
     return AGENTS[kind](model, effort[0] if effort else "low", prompt, schema, image)
 
 
-def describe(describer: str, media_id: str) -> dict:
-    facts = prepare(media_id)
+def write_down(describer: str, facts: dict, sheet: Path) -> tuple[dict, dict]:
+    """One opening's form, from its contact sheet and measurements."""
     seconds = math.ceil(facts["frames"] / FRAMES_PER_SECOND)
     prompt = PROMPT.format(seconds=seconds, frames=facts["frames"], measured=measured(facts),
                            last=f"{seconds - 1}-{seconds} s")
+    return ask(describer, prompt, FORM, sheet)
+
+
+def describe(describer: str, media_id: str) -> dict:
+    facts = prepare(media_id)
     started = time.time()
-    form, usage = ask(describer, prompt, FORM, OPENINGS / f"{media_id}.jpg")
+    form, usage = write_down(describer, facts, OPENINGS / f"{media_id}.jpg")
     record = {"id": media_id, "describer": describer, "version": VERSION, "listened": facts.get("listened", 1),
               "seconds": round(time.time() - started, 1), "usage": usage, "form": form}
     out = description_path(describer, media_id)

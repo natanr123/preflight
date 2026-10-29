@@ -79,6 +79,19 @@ def pending(skip: set[str]) -> list[tuple[str, str]]:
             and not video_path(reel["id"]).exists()]
 
 
+def shrink(original: Path, out: Path, seconds: float | None = None) -> subprocess.CompletedProcess:
+    """`original` as every video here is kept (360 px on the short side, 15
+    frames a second, mono sound), at `out`; with `seconds`, only its start."""
+    return subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", str(FFMPEG_THREADS),
+         *(["-t", str(seconds)] if seconds else []), "-i", str(original),
+         "-vf", f"scale={SHORT_SIDE}:{SHORT_SIDE}:force_original_aspect_ratio=increase"
+                f":force_divisible_by=2,fps={FPS}",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+         "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", "-f", "mp4", str(out)],
+        capture_output=True, timeout=600)
+
+
 def download(item: tuple[str, str]) -> str:
     media_id, url = item
     original, partial = VIDEOS / f"{media_id}.download", VIDEOS / f"{media_id}.part"
@@ -86,13 +99,7 @@ def download(item: tuple[str, str]) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": "PreFlight/0.1"})
         with urllib.request.urlopen(request, timeout=60) as reply, original.open("wb") as handle:
             shutil.copyfileobj(reply, handle)
-        shrunk = subprocess.run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", str(FFMPEG_THREADS), "-i", str(original),
-             "-vf", f"scale={SHORT_SIDE}:{SHORT_SIDE}:force_original_aspect_ratio=increase"
-                    f":force_divisible_by=2,fps={FPS}",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-             "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", "-f", "mp4", str(partial)],
-            capture_output=True, timeout=600)
+        shrunk = shrink(original, partial)
     except urllib.error.HTTPError as failure:
         return "expired" if failure.code in (403, 410) else f"http {failure.code}"
     except (OSError, subprocess.TimeoutExpired):  # network errors, and an ffmpeg that hangs

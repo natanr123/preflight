@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PreFlight</title>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #131722; --panel-2: #1a1f2c; --line: #262c3b; --text: #e9ecf3; --muted: #8d95a8;
+    --accent: #7c6cff; --accent-2: #2dd4bf; --win: #34d399; --warn: #f87171;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: var(--text);
+    background: radial-gradient(1200px 600px at 50% -220px, #1d2346 0%, var(--bg) 62%) var(--bg);
+    font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { text-align: center; padding: 44px 16px 4px; }
+  .brand { display: inline-flex; gap: 10px; align-items: center; font-weight: 750; font-size: 30px; letter-spacing: -0.02em; }
+  .brand svg { width: 30px; height: 30px; }
+  .tagline { color: var(--muted); margin: 6px 0 0; font-size: 16px; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 40px; }
+
+  .slots { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .slot { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 14px; transition: border-color .3s, box-shadow .3s; min-width: 0; }
+  .slot.win { border-color: var(--win); box-shadow: 0 0 0 1px var(--win), 0 12px 40px -12px rgba(52, 211, 153, .5); }
+  .slot-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; }
+  .badge { flex: none; width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; background: var(--panel-2); border: 1px solid var(--line); }
+  .slot.win .badge { background: var(--win); color: #062016; border-color: var(--win); }
+  .name { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .drop { display: block; position: relative; aspect-ratio: 9 / 16; max-height: 440px; margin: 0 auto; border: 1.5px dashed var(--line); border-radius: 14px; overflow: hidden; cursor: pointer; background: var(--panel-2); transition: border-color .2s; }
+  .drop:hover, .drop.over { border-color: var(--accent); }
+  .drop video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: none; }
+  .slot.chosen .drop { border-style: solid; }
+  .slot.chosen video { display: block; }
+  .slot.chosen .empty { display: none; }
+  .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--muted); text-align: center; padding: 16px; }
+  .empty svg { width: 36px; height: 36px; opacity: .7; }
+  .empty strong { color: var(--text); font-weight: 600; }
+  .steps { list-style: none; display: flex; gap: 6px; padding: 0; margin: 12px 0 0; justify-content: center; flex-wrap: wrap; }
+  .steps li { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .steps li.active { color: var(--text); border-color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  .steps li.done { color: var(--win); border-color: rgba(52, 211, 153, .4); }
+  .steps li.done::before { content: "✓ "; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 4px rgba(124, 108, 255, .2); } }
+
+  .actions { text-align: center; margin: 24px 0 6px; }
+  button { font: inherit; font-weight: 650; font-size: 16px; color: white; background: linear-gradient(135deg, var(--accent), #5b8cff); border: 0; border-radius: 12px; padding: 13px 28px; cursor: pointer; box-shadow: 0 8px 24px -8px rgba(124, 108, 255, .7); }
+  button:disabled { opacity: .45; cursor: default; box-shadow: none; }
+  #status { text-align: center; color: var(--muted); min-height: 24px; margin: 8px 0 0; }
+  #status.failed { color: var(--warn); }
+
+  #verdict { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 24px; }
+  .headline { font-size: 34px; font-weight: 750; letter-spacing: -0.02em; margin: 0; }
+  .headline b { color: var(--win); }
+  .sub { color: var(--muted); margin: 2px 0 16px; }
+  .meter { height: 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; margin-bottom: 6px; }
+  .meter div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-2), var(--win)); transition: width .8s ease; }
+  .chance { font-size: 13px; color: var(--muted); margin: 0 0 18px; }
+  .reasons { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .reasons div { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .reasons h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .reasons p { margin: 0; }
+
+  #details { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .detail { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px; min-width: 0; }
+  .detail h3 { margin: 0 0 10px; font-size: 15px; }
+  .detail img { width: 100%; border-radius: 10px; display: block; }
+  .heard { color: var(--muted); font-style: italic; margin: 10px 0; }
+  .seconds { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; font-size: 13.5px; }
+  .seconds b { color: var(--accent-2); font-weight: 600; margin-right: 6px; }
+  .seconds span { display: block; color: var(--muted); }
+  .hook { margin: 12px 0 0; font-size: 13.5px; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; padding: 0 16px 40px; max-width: 900px; margin: 0 auto; }
+  @media (max-width: 720px) { .slots, .reasons, #details { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="url(#g)" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#2dd4bf"/></linearGradient></defs>
+      <path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/>
+    </svg>
+    PreFlight
+  </div>
+  <p class="tagline">Two openings, one account. See which will do better before you post.</p>
+</header>
+
+<main>
+  <section class="slots">
+    <article class="slot" data-side="a">
+      <div class="slot-head"><span class="badge">A</span><span class="name">Opening A</span></div>
+      <label class="drop">
+        <input type="file" accept="video/*" hidden>
+        <div class="empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          <strong>Drop a video</strong><span>or click to choose</span>
+        </div>
+        <video muted playsinline loop></video>
+      </label>
+      <ol class="steps"><li data-step="cutting">Cut 5 s</li><li data-step="listening">Listen</li><li data-step="describing">Write down</li></ol>
+    </article>
+    <article class="slot" data-side="b">
+      <div class="slot-head"><span class="badge">B</span><span class="name">Opening B</span></div>
+      <label class="drop">
+        <input type="file" accept="video/*" hidden>
+        <div class="empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0-4 4m4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          <strong>Drop a video</strong><span>or click to choose</span>
+        </div>
+        <video muted playsinline loop></video>
+      </label>
+      <ol class="steps"><li data-step="cutting">Cut 5 s</li><li data-step="listening">Listen</li><li data-step="describing">Write down</li></ol>
+    </article>
+  </section>
+
+  <div class="actions"><button id="go" disabled>Compare openings</button></div>
+  <p id="status"></p>
+
+  <section id="verdict" hidden>
+    <p class="headline">Post <b id="winner"></b></p>
+    <p class="sub" id="sub"></p>
+    <div id="meter" hidden><div class="meter"><div id="fill"></div></div><p class="chance" id="chance"></p></div>
+    <div class="reasons">
+      <div><h3>Why</h3><p id="why">…</p></div>
+      <div><h3 id="lift-head">To lift the other</h3><p id="lift">…</p></div>
+    </div>
+  </section>
+
+  <section id="details" hidden></section>
+</main>
+<footer id="credits"></footer>
+
+<script>
+const SIDES = ['a', 'b'];
+const STAGES = ['waiting', 'cutting', 'listening', 'describing', 'described'];
+const files = {};
+let config = {};
+const $ = id => document.getElementById(id);
+const slot = side => document.querySelector(`.slot[data-side="${side}"]`);
+const esc = text => String(text ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+function label(agent) {
+  if (!agent) return '';
+  if (agent.startsWith('glimmer:')) return 'Muse Glimmer 30B, fine-tuned';
+  if (agent.startsWith('meta:muse-spark')) return 'Muse Spark';
+  return `${agent.split(':')[1]} (stand-in)`;
+}
+
+fetch('/api/config').then(reply => reply.json()).then(settings => {
+  config = settings;
+  const record = settings.record
+    ? ` On ${settings.record.pairs} pairs from accounts it never saw, it picked the Reel that did better
+       ${settings.record.right} times (${Math.round(100 * settings.record.right / settings.record.pairs)}%).` : '';
+  $('credits').textContent = `Openings written down by ${label(settings.describer)}. Judged by ${label(settings.judge)}.`
+    + `${record} Reasons by ${label(settings.explainer)}.`;
+});
+
+function choose(side, file) {
+  files[side] = file;
+  const card = slot(side), video = card.querySelector('video');
+  video.src = URL.createObjectURL(file);
+  video.play().catch(() => {});
+  card.classList.add('chosen');
+  card.querySelector('.name').textContent = file.name;
+  $('go').disabled = !(files.a && files.b);
+  reset();
+}
+
+for (const side of SIDES) {
+  const card = slot(side), drop = card.querySelector('.drop'), input = card.querySelector('input');
+  const video = card.querySelector('video');
+  input.addEventListener('change', () => input.files[0] && choose(side, input.files[0]));
+  drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', event => {
+    event.preventDefault();
+    drop.classList.remove('over');
+    if (event.dataTransfer.files[0]) choose(side, event.dataTransfer.files[0]);
+  });
+  // Only the opening matters, so only the opening plays.
+  video.addEventListener('timeupdate', () => { if (video.currentTime > 5) video.currentTime = 0; });
+}
+
+function reset() {
+  $('verdict').hidden = $('details').hidden = true;
+  $('status').textContent = '';
+  for (const side of SIDES) {
+    slot(side).classList.remove('win');
+    slot(side).querySelectorAll('.steps li').forEach(step => step.className = '');
+  }
+}
+
+$('go').addEventListener('click', async () => {
+  $('go').disabled = true;
+  reset();
+  $('status').className = '';
+  const body = new FormData();
+  for (const side of SIDES) body.append(side, files[side]);
+  try {
+    const reply = await fetch('/api/compare', {method: 'POST', body});
+    poll((await reply.json()).job);
+  } catch (error) {
+    $('status').className = 'failed';
+    $('status').textContent = `Could not start: ${error}`;
+    $('go').disabled = false;
+  }
+});
+
+async function poll(job) {
+  const state = await (await fetch(`/api/jobs/${job}`)).json();
+  render(state);
+  if (state.stage === 'done' || state.stage === 'failed') $('go').disabled = false;
+  else setTimeout(() => poll(job), 700);
+}
+
+function render(state) {
+  for (const side of SIDES) {
+    const at = STAGES.indexOf(state.openings[side].stage);
+    slot(side).querySelectorAll('.steps li').forEach(step => {
+      const index = STAGES.indexOf(step.dataset.step);
+      step.className = at > index ? 'done' : at === index ? 'active' : '';
+    });
+  }
+  $('status').className = state.stage === 'failed' ? 'failed' : '';
+  $('status').textContent = {
+    openings: 'Reading both openings…', judging: `Asking ${label(config.judge)}…`,
+    explaining: 'Putting it into words…', done: '', failed: state.error,
+  }[state.stage] ?? '';
+  if (state.verdict) showVerdict(state.verdict);
+  if (state.stage === 'done') showDetails(state.openings);
+}
+
+function showVerdict(verdict) {
+  const better = verdict.better, other = better === 'A' ? 'B' : 'A';
+  $('verdict').hidden = false;
+  $('winner').textContent = better;
+  $('sub').textContent = `Opening ${better} is likely to beat opening ${other} on this account.`;
+  for (const side of SIDES) slot(side).classList.toggle('win', side.toUpperCase() === better);
+  $('meter').hidden = verdict.chance == null;
+  if (verdict.chance != null) {
+    requestAnimationFrame(() => $('fill').style.width = `${Math.round(100 * verdict.chance)}%`);
+    $('chance').textContent = `${Math.round(100 * verdict.chance)}% sure, reading the two both ways round`;
+  }
+  $('why').textContent = verdict.why ?? '…';
+  $('lift-head').textContent = `To lift ${other}`;
+  $('lift').textContent = verdict.lift ?? '…';
+}
+
+function showDetails(openings) {
+  $('details').hidden = false;
+  $('details').innerHTML = SIDES.map(side => {
+    const opening = openings[side], form = opening.form;
+    return `<article class="detail">
+      <h3>Opening ${side.toUpperCase()}: what the model read</h3>
+      <img src="/api/openings/${opening.key}/sheet.jpg" alt="Frames from opening ${side.toUpperCase()}, every half second">
+      <p class="heard">${opening.words ? `“${esc(opening.words)}”` : 'No speech'}</p>
+      <ul class="seconds">${form.seconds.map(second => `<li><b>${esc(second.second)}</b>${esc(second.seen)}
+        <span>On screen: ${esc(second.text_on_screen)}</span><span>Heard: ${esc(second.heard)}</span></li>`).join('')}</ul>
+      <p class="hook"><b>Hook:</b> ${esc(form.hook)}</p>
+    </article>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
