@@ -14,9 +14,13 @@ why and what could lift the other one.
 
 **Judges.** `glimmer:<run>` is the fine-tuned Muse Glimmer on Modal
 (`preflight.finetune.Judge`, deployed first). It reads the pair both ways
-round, and the chance shown is the average, as in its test. Any other judge
-is a model asked zero-shot, the way the pair test asks it
-(`preflight.pairs.PROMPT`).
+round and averages the two, as in its test. Its own probability is not shown:
+trained to near-zero loss, it is all but certain of nearly every pair (172 of
+207 held-out pairs at 99% or more for `pairs-luna-3ep`, right on 69% of
+them). The page says instead how often calls like this one were right on the
+held-out pairs, and when the two readings contradict each other, that it is
+too close to call. Any other judge is a model asked zero-shot, the way the
+pair test asks it (`preflight.pairs.PROMPT`).
 
 **Stand-ins.** Until the Meta credit is in, the defaults run on the user's own
 subscriptions. The real thing is `--describer meta:muse-spark-1.3 --judge
@@ -45,9 +49,13 @@ from preflight.videos import shrink
 DEMO = DEFAULT_PATH.parent / "demo"
 PAGE = Path(__file__).with_name("demo.html")
 SIDES = ("a", "b")
+#: A fine-tuned judge's chance this near a half means its two readings of the
+#: pair contradict each other (each all but certain, the other way round). On
+#: the held-out pairs these were coin tosses: 11 of 22 right for `pairs-luna-3ep`.
+CLOSE = 0.1
 
 EXPLAIN = """\
-Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight expects
+Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight {expects}
 Reel {better} to get more views than Reel {other}, measured against how the account's Reels usually do.
 
 In `why`, say in one or two sentences what in the openings most likely makes that difference, pointing to what is
@@ -123,13 +131,15 @@ def judge(judge: str, forms: dict[str, dict]) -> dict:
         rate = modal.Cls.from_name("preflight", "Judge")(run=judge.split(":", 1)[1]).rate
         a_first, b_first = rate.remote([pair_text(texts, "a", "b"), pair_text(texts, "b", "a")])
         chance = (a_first + 1 - b_first) / 2  # that A does better, read both ways round
-        return {"better": "A" if chance > 0.5 else "B", "chance": max(chance, 1 - chance)}
+        return {"better": "A" if chance > 0.5 else "B", "close": abs(chance - 0.5) < CLOSE}
     answer, _ = ask(judge, PROMPT.format(captions="", a=texts["a"], b=texts["b"]), VERDICT)
-    return {"better": answer["better"], "chance": None}
+    return {"better": answer["better"], "close": False}
 
 
-def explain(explainer: str, forms: dict[str, dict], better: str) -> dict:
-    prompt = EXPLAIN.format(better=better, other="B" if better == "A" else "A",
+def explain(explainer: str, forms: dict[str, dict], verdict: dict) -> dict:
+    better = verdict["better"]
+    prompt = EXPLAIN.format(expects="finds the two close, but leans to" if verdict["close"] else "expects",
+                            better=better, other="B" if better == "A" else "A",
                             a=as_text(forms["a"]), b=as_text(forms["b"]))
     return ask(explainer, prompt, EXPLANATION)[0]
 
@@ -143,7 +153,7 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
         update(state, stage="judging")
         verdict = judge(config["judge"], forms)
         update(state, stage="explaining", verdict=verdict)
-        update(state, stage="done", verdict=verdict | explain(config["explainer"], forms, verdict["better"]))
+        update(state, stage="done", verdict=verdict | explain(config["explainer"], forms, verdict))
     except Exception as error:  # shown on the page, and the server carries on
         log(f"{job}: {type(error).__name__}: {error}")
         update(state, stage="failed", error=f"{type(error).__name__}: {error}")
@@ -153,13 +163,21 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
 
 
 def track_record(judge: str, describer: str) -> dict | None:
-    """How the judge did on the held-out pairs, for the page to quote."""
+    """How the judge did on the held-out pairs, for the page to quote: in all,
+    and for a fine-tuned judge, apart on its firm and its close calls."""
     if judge.startswith("glimmer:"):
         path = DEMO.parent / "finetune" / f"{judge.split(':', 1)[1]}.json"
         if not path.exists():
             return None
         tuned = json.loads(path.read_text())["tuned"]
-        return {"right": tuned["pairs_right"], "pairs": tuned["pairs"]}
+        record = {"right": tuned["pairs_right"], "pairs": tuned["pairs"]}
+        if "better" not in tuned:  # scored before the answers were kept with the chances
+            return record
+        for kind, close in (("firm", False), ("close", True)):
+            calls = [(chance > 0.5) == (better == "A") for chance, better in zip(tuned["chances"], tuned["better"])
+                     if (abs(chance - 0.5) < CLOSE) == close]
+            record[kind] = {"right": sum(calls), "pairs": len(calls)}
+        return record
     folder = verdict_path("held-out", judge, describer, False, {"a": "", "b": ""}).parent
     records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
     return {"right": sum(record["right"] for record in records), "pairs": len(records)} if records else None

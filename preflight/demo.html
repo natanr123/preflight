@@ -120,7 +120,7 @@
   <p id="status"></p>
 
   <section id="verdict" hidden>
-    <p class="headline">Post <b id="winner"></b></p>
+    <p class="headline" id="headline"></p>
     <p class="sub" id="sub"></p>
     <div id="meter" hidden><div class="meter"><div id="fill"></div></div><p class="chance" id="chance"></p></div>
     <div class="reasons">
@@ -236,13 +236,19 @@ function render(state) {
 function showVerdict(verdict) {
   const better = verdict.better, other = better === 'A' ? 'B' : 'A';
   $('verdict').hidden = false;
-  $('winner').textContent = better;
-  $('sub').textContent = `Opening ${better} is likely to beat opening ${other} on this account.`;
-  for (const side of SIDES) slot(side).classList.toggle('win', side.toUpperCase() === better);
-  $('meter').hidden = verdict.chance == null;
-  if (verdict.chance != null) {
-    requestAnimationFrame(() => $('fill').style.width = `${Math.round(100 * verdict.chance)}%`);
-    $('chance').textContent = `${Math.round(100 * verdict.chance)}% sure, reading the two both ways round`;
+  $('headline').innerHTML = verdict.close ? 'Too close to call' : `Post <b>${better}</b>`;
+  $('sub').textContent = verdict.close
+    ? `Read both ways round, the judge contradicted itself. It leans to opening ${better}.`
+    : `Opening ${better} is likely to beat opening ${other} on this account.`;
+  for (const side of SIDES) slot(side).classList.toggle('win', !verdict.close && side.toUpperCase() === better);
+  // How often calls like this one were right in testing, not the judge's own (overconfident) probability.
+  const record = config.record?.[verdict.close ? 'close' : 'firm'];
+  $('meter').hidden = !record;
+  if (record) {
+    const share = Math.round(100 * record.right / record.pairs);
+    requestAnimationFrame(() => $('fill').style.width = `${share}%`);
+    $('chance').textContent = `Calls this ${verdict.close ? 'close' : 'firm'} were right ${record.right} of `
+      + `${record.pairs} times (${share}%) on accounts it never saw.`;
   }
   $('why').textContent = verdict.why ?? '…';
   $('lift-head').textContent = `To lift ${other}`;

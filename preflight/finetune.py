@@ -314,7 +314,7 @@ def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "
                             for i, pair in enumerate(test_pairs))
             return {"pairs_right": right, "one_order_right": one_order, "pairs": len(test_pairs),
                     "interval": wilson(right, len(test_pairs)), "spread": [min(probabilities), max(probabilities)],
-                    "chances": chances}
+                    "chances": chances, "better": [pair["better"] for pair in test_pairs]}
         by_id = dict(zip(test_ids, probabilities))
         right = sum((by_id[pair["a"]] > by_id[pair["b"]]) == (pair["better"] == "A") for pair in test_pairs)
         truth = [rows[media_id]["beats_median"] for media_id in test_ids]
