@@ -132,7 +132,7 @@ def judge(judge: str, forms: dict[str, dict]) -> dict:
         a_first, b_first = rate.remote([pair_text(texts, "a", "b"), pair_text(texts, "b", "a")])
         chance = (a_first + 1 - b_first) / 2  # that A does better, read both ways round
         return {"better": "A" if chance > 0.5 else "B", "close": abs(chance - 0.5) < CLOSE}
-    answer, _ = ask(judge, PROMPT.format(captions="", a=texts["a"], b=texts["b"]), VERDICT)
+    answer, _ = ask(judge, PROMPT.format(captions="", frames="", a=texts["a"], b=texts["b"]), VERDICT)
     return {"better": answer["better"], "close": False}
 
 

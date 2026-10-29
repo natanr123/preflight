@@ -2,6 +2,7 @@
 reads their written-down openings.
 
     uv run python -m preflight.pairs run --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna [--caption]
+                                         [--first-frames]
     uv run python -m preflight.pairs report --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna
 
 **Why.** It is the product's question: of two openings, which will do better
@@ -19,6 +20,11 @@ drawn once from every such Reel with a video and kept in
 with the same Reel shown first; a judge takes those both sides of which its
 describer wrote down. (`--set sol-sample` is the first, exploratory set: 160
 pairs from the 497 Reels Codex Sol described, held-out accounts or not.)
+
+**First frames.** `--first-frames` also shows the judge both Reels' first
+frames, side by side, for what the words may miss of how they look. The
+written-down openings already describe that frame, so it asks whether the
+pixels add anything.
 
 **Score.** How often the judge picks the Reel that did better, with a 95%
 interval (pairs from one account are not quite independent, so read it as
@@ -39,7 +45,7 @@ from pathlib import Path
 
 from preflight.dataset import OUT as DATASET
 from preflight.describe import FAILURES, STOPS, as_text, ask, load_descriptions, log
-from preflight.videos import video_path
+from preflight.videos import first_frame, video_path
 
 PAIRS = DATASET.parent / "pairs"
 #: One account in this many, picked by a hash of its name, is held out of
@@ -65,7 +71,7 @@ VERDICT = {
 
 PROMPT = """\
 Two Reels were posted on the same Instagram account. Below is what the first five seconds of each show and say,
-written down by someone who watched them{captions}.
+written down by someone who watched them{captions}.{frames}
 
 Which of the two got more views, measured against how this account's Reels usually do? These openings are all you
 have to go on; there is always an answer.
@@ -78,6 +84,7 @@ Reel B
 
 Answer with the form only.
 """
+FRAMES = " The attached picture shows each one's first frame: Reel A's on the left, Reel B's on the right."
 
 
 def held_out(username: str) -> bool:
@@ -113,24 +120,46 @@ def load_pairs(name: str, rows: dict[str, dict]) -> list[dict]:
     return json.loads(path.read_text())["pairs"]
 
 
-def verdict_path(name: str, judge: str, describer: str, captions: bool, pair: dict) -> Path:
-    setup = describer + ("+captions" if captions else "")
+def verdict_path(name: str, judge: str, describer: str, captions: bool, pair: dict, frames: bool = False) -> Path:
+    setup = describer + ("+captions" if captions else "") + ("+first-frames" if frames else "")
     return PAIRS / name / setup.replace(":", "-") / judge.replace(":", "-") / f"{pair['a']}-{pair['b']}.json"
 
 
-def judge_pair(name: str, judge: str, describer: str, captions: bool, pair: dict, forms: dict, rows: dict) -> dict:
+def first_frames(name: str, pair: dict) -> Path:
+    """Both Reels' first frames side by side, as the prompt says: A's on the left."""
+    out = PAIRS / name / "first-frames" / f"{pair['a']}-{pair['b']}.jpg"
+    if not out.exists():
+        from PIL import Image, ImageDraw, ImageFont
+
+        frames = [Image.open(first_frame(pair[side])).convert("RGB") for side in ("a", "b")]
+        height, label, gutter = min(frame.height for frame in frames), 44, 16
+        frames = [frame.resize((round(frame.width * height / frame.height), height)) for frame in frames]
+        sheet = Image.new("RGB", (frames[0].width + gutter + frames[1].width, label + height), "white")
+        draw, font = ImageDraw.Draw(sheet), ImageFont.load_default(size=30)
+        x = 0
+        for side, frame in zip("AB", frames):
+            sheet.paste(frame, (x, label))
+            draw.text((x + 8, 6), f"Reel {side}", fill="black", font=font)
+            x += frame.width + gutter
+        out.parent.mkdir(parents=True, exist_ok=True)
+        sheet.save(out, quality=90)
+    return out
+
+
+def judge_pair(name: str, judge: str, describer: str, captions: bool, pair: dict, forms: dict, rows: dict,
+               frames: bool = False) -> dict:
     def shown(media_id: str) -> str:
         caption = f"\nCaption: {rows[media_id]['caption'] or '(none)'}" if captions else ""
         return as_text(forms[media_id]) + caption
 
-    prompt = PROMPT.format(captions=", and each one's caption" if captions else "",
+    prompt = PROMPT.format(captions=", and each one's caption" if captions else "", frames=FRAMES if frames else "",
                            a=shown(pair["a"]), b=shown(pair["b"]))
     started = time.time()
-    answer, usage = ask(judge, prompt, VERDICT)
-    record = {**pair, "judge": judge, "describer": describer, "captions": captions, "said": answer["better"],
-              "right": answer["better"] == pair["better"], "why": answer["why"],
+    answer, usage = ask(judge, prompt, VERDICT, first_frames(name, pair) if frames else None)
+    record = {**pair, "judge": judge, "describer": describer, "captions": captions, "first_frames": frames,
+              "said": answer["better"], "right": answer["better"] == pair["better"], "why": answer["why"],
               "seconds": round(time.time() - started, 1), "usage": usage}
-    out = verdict_path(name, judge, describer, captions, pair)
+    out = verdict_path(name, judge, describer, captions, pair, frames)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(record, ensure_ascii=False, indent=1))
     return record
@@ -145,8 +174,8 @@ def wilson(right: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return centre - half, centre + half
 
 
-def report(name: str, judge: str, describer: str, captions: bool) -> None:
-    folder = verdict_path(name, judge, describer, captions, {"a": "", "b": ""}).parent
+def report(name: str, judge: str, describer: str, captions: bool, frames: bool = False) -> None:
+    folder = verdict_path(name, judge, describer, captions, {"a": "", "b": ""}, frames).parent
     records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
     if not records:
         log(f"no verdicts in {folder}")
@@ -154,16 +183,17 @@ def report(name: str, judge: str, describer: str, captions: bool) -> None:
     n, right = len(records), sum(record["right"] for record in records)
     low, high = wilson(right, n)
     first = sum(record["said"] == "A" for record in records)
-    log(f"{name}: {judge} reading {describer}{' + captions' if captions else ''}: picked the better Reel in {right} of {n} "
-        f"pairs = {right / n:.0%} (95%: {low:.0%}-{high:.0%}); said A {first / n:.0%} of the time, "
-        f"from {len({record['account'] for record in records})} accounts")
+    log(f"{name}: {judge} reading {describer}{' + captions' if captions else ''}{' + first frames' if frames else ''}: "
+        f"picked the better Reel in {right} of {n} pairs = {right / n:.0%} (95%: {low:.0%}-{high:.0%}); "
+        f"said A {first / n:.0%} of the time, from {len({record['account'] for record in records})} accounts")
 
 
-def run(name: str, judge: str, describer: str, captions: bool, workers: int, limit: int | None) -> None:
+def run(name: str, judge: str, describer: str, captions: bool, workers: int, limit: int | None,
+        frames: bool = False) -> None:
     rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
     forms = load_descriptions(describer)
     pairs = [pair for pair in load_pairs(name, rows)[:limit] if pair["a"] in forms and pair["b"] in forms]
-    todo = [pair for pair in pairs if not verdict_path(name, judge, describer, captions, pair).exists()]
+    todo = [pair for pair in pairs if not verdict_path(name, judge, describer, captions, pair, frames).exists()]
     log(f"{len(todo)} of {len(pairs)} pairs to judge with {judge}")
     stop, counts = threading.Event(), Counter()
 
@@ -171,7 +201,8 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
         if stop.is_set():
             return "left for later"
         try:
-            return "right" if judge_pair(name, judge, describer, captions, pair, forms, rows)["right"] else "wrong"
+            record = judge_pair(name, judge, describer, captions, pair, forms, rows, frames)
+            return "right" if record["right"] else "wrong"
         except STOPS as limit:
             stop.set()
             log(f"stopping: {type(limit).__name__}: {limit}")
@@ -186,7 +217,7 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
             if count % 25 == 0:
                 log(f"{count}/{len(todo)} {dict(counts)}")
     log(f"done: {dict(counts)}")
-    report(name, judge, describer, captions)
+    report(name, judge, describer, captions, frames)
 
 
 def main() -> int:
@@ -196,13 +227,14 @@ def main() -> int:
     parser.add_argument("--set", dest="name", default="held-out", help="which pairs (held-out, sol-sample)")
     parser.add_argument("--describer", default="codex:gpt-6-luna", help="whose descriptions the judge reads")
     parser.add_argument("--caption", dest="captions", action="store_true", help="show each Reel's caption too")
+    parser.add_argument("--first-frames", dest="frames", action="store_true", help="show both first frames too")
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--limit", type=int, help="only the first N pairs")
     args = parser.parse_args()
     if args.command == "run":
-        run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit)
+        run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit, args.frames)
     else:
-        report(args.name, args.judge, args.describer, args.captions)
+        report(args.name, args.judge, args.describer, args.captions, args.frames)
     return 0
 
 

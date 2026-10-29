@@ -32,6 +32,7 @@ from preflight.dataset import MIN_REELS, window_reels
 from preflight.store import DEFAULT_PATH
 
 VIDEOS = DEFAULT_PATH.parent / "videos"
+FIRST_FRAMES = DEFAULT_PATH.parent / "first_frames"
 SHORT_SIDE, FPS = 360, 15
 #: Two videos at a time, two ffmpeg threads each: the laptop is shared (see
 #: `preflight.baseline.THREADS`).
@@ -40,6 +41,23 @@ WORKERS, FFMPEG_THREADS = 2, 2
 
 def video_path(media_id: str) -> Path:
     return VIDEOS / f"{media_id}.mp4"
+
+
+def first_frame(media_id: str) -> Path:
+    """The video's first frame, what the feed shows before anything moves:
+    made once and kept (`data/first_frames/<media id>.jpg`)."""
+    out = FIRST_FRAMES / f"{media_id}.jpg"
+    if not out.exists():
+        FIRST_FRAMES.mkdir(parents=True, exist_ok=True)
+        partial = out.with_suffix(".part.jpg")
+        made = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-i",
+                               str(video_path(media_id)), "-frames:v", "1", "-q:v", "3", str(partial)],
+                              capture_output=True, timeout=60)
+        if made.returncode or not partial.exists():
+            partial.unlink(missing_ok=True)
+            raise ValueError(f"no first frame from {media_id}: {made.stderr.decode(errors='replace')[-200:]}")
+        partial.rename(out)
+    return out
 
 
 def live(url: str | None, now: datetime) -> bool:
