@@ -29,8 +29,10 @@ the cap, bfloat16 rounded every Reel's answer to exactly 0.5.
 """
 import json
 import random
+import shutil
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import modal
 
@@ -61,6 +63,10 @@ SYSTEMS = {
 ANSWERS = {"pointwise": ("Yes", "No"), "pairwise": ("A", "B")}
 PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj")
 ADAPTERS = "/vol/adapters"
+CHECKPOINTS = "/vol/checkpoints"
+#: Steps between checkpoints. Modal can preempt a GPU container (it did at step
+#: 14 of 483 on 2026-10-29), and a run without them starts over.
+SAVE_EVERY = 40
 
 
 def messages(task: str, text: str) -> list[dict]:
@@ -149,36 +155,49 @@ def train(run: str, model_id: str, task: str, examples: list[dict], epochs: floa
 
     started = time.time()
     model, tokenizer = load(model_id)
-    each_epoch = []
+    out, adapters = Path(CHECKPOINTS) / run, Path(ADAPTERS)
+    # Modal starts a preempted container again on the same input, which carries on from the last checkpoint.
+    resume = any(out.glob("checkpoint-*"))
+    if not resume:  # a new run under an old name starts clean
+        shutil.rmtree(out, ignore_errors=True)
+        for old in adapters.glob(f"{run}-epoch*"):
+            shutil.rmtree(old)
 
     class EveryEpoch(TrainerCallback):
         def on_epoch_end(self, args, state, control, model=None, **kwargs):
-            epoch = round(state.epoch)
-            model.save_pretrained(f"{ADAPTERS}/{run}-epoch{epoch}")
+            epoch, folder = round(state.epoch), adapters / f"{run}-epoch{round(state.epoch)}"
+            model.save_pretrained(folder)
+            (folder / "chances.json").write_text(json.dumps({
+                "epoch": epoch, "step": state.global_step, "probabilities": chances(model, tokenizer, task, checks)}))
             volume.commit()
-            each_epoch.append({"epoch": epoch, "step": state.global_step,
-                               "probabilities": chances(model, tokenizer, task, checks)})
             print(f"epoch {epoch} scored, {(time.time() - started) / 60:.0f} min in", flush=True)
+
+    class Kept(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            volume.commit()  # a checkpoint outlives the container only once committed
 
     targets = sorted({name for name, _ in model.named_modules()
                       if name.split(".")[-1] in PROJECTIONS and "vision" not in name})
     data = Dataset.from_list([{"prompt": messages(task, example["text"]),
                                "completion": [{"role": "assistant", "content": example["answer"]}]}
                               for example in examples])
-    config = SFTConfig(output_dir="/tmp/out", num_train_epochs=epochs, per_device_train_batch_size=4,
+    config = SFTConfig(output_dir=str(out), num_train_epochs=epochs, per_device_train_batch_size=4,
                        gradient_accumulation_steps=4, learning_rate=learning_rate, lr_scheduler_type="cosine",
                        warmup_steps=10, bf16=True, gradient_checkpointing=True,
                        gradient_checkpointing_kwargs={"use_reentrant": False}, max_length=3072,
-                       completion_only_loss=True, logging_steps=10, save_strategy="no", report_to="none")
+                       completion_only_loss=True, logging_steps=10, save_strategy="steps", save_steps=SAVE_EVERY,
+                       save_total_limit=1, report_to="none")
     lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules=targets, task_type="CAUSAL_LM")
     trainer = SFTTrainer(model=model, args=config, train_dataset=data, processing_class=tokenizer, peft_config=lora,
-                         callbacks=[EveryEpoch()] if checks else None)
-    result = trainer.train()
+                         callbacks=[Kept()] + ([EveryEpoch()] if checks else []))
+    result = trainer.train(resume_from_checkpoint=resume or None)
     trainer.save_model(f"{ADAPTERS}/{run}")
     volume.commit()
     return {"train_loss": result.training_loss, "steps": result.global_step, "examples": len(examples),
-            "minutes": round((time.time() - started) / 60, 1),
-            "log": [entry for entry in trainer.state.log_history if "loss" in entry], "each_epoch": each_epoch}
+            "minutes": round((time.time() - started) / 60, 1), "resumed": resume,
+            "log": [entry for entry in trainer.state.log_history if "loss" in entry],
+            "each_epoch": [json.loads(path.read_text())
+                           for path in sorted(adapters.glob(f"{run}-epoch*/chances.json"))]}
 
 
 @app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=2 * 3600)
