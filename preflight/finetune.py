@@ -79,11 +79,12 @@ def load(model_id: str):
     causal = AutoConfig.from_pretrained(model_id).model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
     loader = AutoModelForCausalLM if causal else AutoModelForImageTextToText
     model = loader.from_pretrained(model_id, quantization_config=quantized, dtype=torch.bfloat16, device_map="auto")
-    # No soft cap: with it, training lifted both answers to the cap, where they tie at 0.5 and the gradient
-    # vanishes (the pointwise run on 2026-10-29 learned nothing after step 20).
+    # A soft cap too high to bind: with Glimmer's own (20), training lifted both answers to the cap, where they
+    # tie at 0.5 and the gradient vanishes (the pointwise run on 2026-10-29 learned nothing after step 20). The
+    # config only takes a float, so the cap is raised rather than removed.
     for config in (model.config, getattr(model.config, "text_config", None)):
         if getattr(config, "final_logit_softcapping", None):
-            config.final_logit_softcapping = None
+            config.final_logit_softcapping = 1e4
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
