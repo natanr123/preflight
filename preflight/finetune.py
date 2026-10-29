@@ -1,26 +1,35 @@
-"""Fine-tune Muse Glimmer on Modal to say whether a Reel's opening beats its account's usual.
+"""Fine-tune Muse Glimmer on Modal to tell which of two openings did better.
 
     uv run modal run -m preflight.finetune --run smoke                       # the whole path on a tiny model
-    uv run modal run -m preflight.finetune --run practice-luna --describer codex:gpt-6-luna --model glimmer
+    uv run modal run -m preflight.finetune --run pairs-luna --describer codex:gpt-6-luna --model glimmer
 
-**What it learns.** One Reel at a time: its written-down opening (and, with
-`--captions`, its caption) in; "Yes" or "No" out: did it beat its own
-account's median views. Two openings are compared by comparing those answers,
-which is how it takes the pair test (`preflight.pairs`), and how the demo will
-rank a creator's candidates.
+**What it learns.** By default (`--task pairwise`), the pair test's own
+question: two Reels from one account, written down second by second, in; "A"
+or "B" out: which one got more views against the account's usual. Training
+pairs come from the training accounts the way the test pairs are drawn (one
+Reel beat the usual, the other did not, at least 2x apart), each shown in both
+orders. `--task pointwise` asks of one Reel at a time "did it beat its usual?"
+instead; on Luna's descriptions it learned nothing (2026-10-29: every held-out
+Reel got exactly 0.5; the answer token stayed at ln 2 from step 20 on).
 
 **Held out.** A quarter of the accounts (`preflight.pairs.held_out`) never
 train, so the fine-tune is scored only on accounts it never saw, on the very
-pairs the zero-shot judges take.
+pairs the zero-shot judges take. Glimmer without the adapter takes them too,
+for reference.
 
 **On Modal.** The weights (60 GB) are fetched once into a Volume by a CPU
 container. QLoRA follows Meta's post-training guide for Glimmer (4-bit NF4,
 r=16, alpha=32, the attention projections of the language model; about 28 GB
 at peak, so one L40S). The answer is trained without reasoning, and scoring
-reads P(Yes) off the first answer token, so it needs no generation.
+reads the first answer token's probability, so it needs no generation. It is
+worked out from the raw logits, in float32: Glimmer soft-caps its logits at 20
+(`final_logit_softcapping`), and once training lifted "Yes" and "No" both near
+the cap, bfloat16 rounded every Reel's answer to exactly 0.5.
 """
 import json
+import random
 import time
+from collections import defaultdict
 
 import modal
 
@@ -41,14 +50,20 @@ MODELS = {"glimmer": "meta-models/Muse-Glimmer-30B",
 GPUS = ["L40S", "A100-40GB", "A100-80GB"]
 #: The template's own default is "Reasoning strength: high"; naming it here
 #: keeps that directive out, and the answer is trained to come without reasoning.
-SYSTEM = ("You read the opening seconds of an Instagram Reel, written down second by second, and say whether the "
-          "Reel got more views than its account's usual. Answer Yes or No. Reasoning strength: low.")
+SYSTEMS = {
+    "pointwise": "You read the opening seconds of an Instagram Reel, written down second by second, and say whether "
+                 "the Reel got more views than its account's usual. Answer Yes or No. Reasoning strength: low.",
+    "pairwise": "You read the opening seconds of two Instagram Reels from the same account, written down second by "
+                "second, and say which one got more views compared with how the account's Reels usually do. Answer "
+                "A or B. Reasoning strength: low.",
+}
+ANSWERS = {"pointwise": ("Yes", "No"), "pairwise": ("A", "B")}
 PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj")
 ADAPTERS = "/vol/adapters"
 
 
-def messages(text: str) -> list[dict]:
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}]
+def messages(task: str, text: str) -> list[dict]:
+    return [{"role": "system", "content": SYSTEMS[task]}, {"role": "user", "content": text}]
 
 
 def load(model_id: str):
@@ -64,6 +79,11 @@ def load(model_id: str):
     causal = AutoConfig.from_pretrained(model_id).model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
     loader = AutoModelForCausalLM if causal else AutoModelForImageTextToText
     model = loader.from_pretrained(model_id, quantization_config=quantized, dtype=torch.bfloat16, device_map="auto")
+    # No soft cap: with it, training lifted both answers to the cap, where they tie at 0.5 and the gradient
+    # vanishes (the pointwise run on 2026-10-29 learned nothing after step 20).
+    for config in (model.config, getattr(model.config, "text_config", None)):
+        if getattr(config, "final_logit_softcapping", None):
+            config.final_logit_softcapping = None
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -79,7 +99,7 @@ def fetch(model_id: str) -> None:
 
 
 @app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=6 * 3600)
-def train(run: str, model_id: str, examples: list[dict], epochs: float) -> dict:
+def train(run: str, model_id: str, task: str, examples: list[dict], epochs: float, learning_rate: float) -> dict:
     from datasets import Dataset
     from peft import LoraConfig
     from trl import SFTConfig, SFTTrainer
@@ -88,13 +108,13 @@ def train(run: str, model_id: str, examples: list[dict], epochs: float) -> dict:
     model, tokenizer = load(model_id)
     targets = sorted({name for name, _ in model.named_modules()
                       if name.split(".")[-1] in PROJECTIONS and "vision" not in name})
-    data = Dataset.from_list([{"prompt": messages(example["text"]),
+    data = Dataset.from_list([{"prompt": messages(task, example["text"]),
                                "completion": [{"role": "assistant", "content": example["answer"]}]}
                               for example in examples])
     config = SFTConfig(output_dir="/tmp/out", num_train_epochs=epochs, per_device_train_batch_size=4,
-                       gradient_accumulation_steps=4, learning_rate=2e-4, lr_scheduler_type="cosine",
+                       gradient_accumulation_steps=4, learning_rate=learning_rate, lr_scheduler_type="cosine",
                        warmup_steps=10, bf16=True, gradient_checkpointing=True,
-                       gradient_checkpointing_kwargs={"use_reentrant": False}, max_length=2048,
+                       gradient_checkpointing_kwargs={"use_reentrant": False}, max_length=3072,
                        completion_only_loss=True, logging_steps=10, save_strategy="no", report_to="none")
     lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, target_modules=targets, task_type="CAUSAL_LM")
     trainer = SFTTrainer(model=model, args=config, train_dataset=data, processing_class=tokenizer, peft_config=lora)
@@ -107,8 +127,9 @@ def train(run: str, model_id: str, examples: list[dict], epochs: float) -> dict:
 
 
 @app.function(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=2 * 3600)
-def score(run: str | None, model_id: str, texts: list[str]) -> list[float]:
-    """P(Yes) for each opening, from the logits of the first answer token."""
+def score(run: str | None, model_id: str, task: str, texts: list[str]) -> list[float]:
+    """The probability of the first answer ("Yes", or "A") for each text, from
+    its first token; without `run`, Glimmer as it comes."""
     import torch
     from peft import PeftModel
 
@@ -118,80 +139,131 @@ def score(run: str | None, model_id: str, texts: list[str]) -> list[float]:
     model.eval()
     tokenizer.padding_side = "left"
     # Where the two answers part, right after the template's header for the reply.
-    sample = messages("")
-    yes, no = (tokenizer.apply_chat_template(sample + [{"role": "assistant", "content": answer}], tokenize=False)
-               for answer in ("Yes", "No"))
-    split = next(index for index, (a, b) in enumerate(zip(yes, no)) if a != b)
-    header = yes[len(tokenizer.apply_chat_template(sample, tokenize=False)):split]
-    yes_id, no_id = (tokenizer(answer, add_special_tokens=False).input_ids[0] for answer in ("Yes", "No"))
-    prompts = [tokenizer.apply_chat_template(messages(text), tokenize=False) + header for text in texts]
+    first, second = ANSWERS[task]
+    sample = messages(task, "")
+    one, other = (tokenizer.apply_chat_template(sample + [{"role": "assistant", "content": answer}], tokenize=False)
+                  for answer in (first, second))
+    split = next(index for index, (a, b) in enumerate(zip(one, other)) if a != b)
+    header = one[len(tokenizer.apply_chat_template(sample, tokenize=False)):split]
+    ids = [tokenizer(answer, add_special_tokens=False).input_ids[0] for answer in (first, second)]
+    # The two answers' rows of the output layer, applied by hand to what goes into it: raw logits, before the cap.
+    output_layer = model.get_output_embeddings()
+    head, seen = output_layer.weight[ids].float(), {}
+    hook = output_layer.register_forward_hook(lambda _, inputs, __: seen.update(last=inputs[0][:, -1, :].float()))
+    prompts = [tokenizer.apply_chat_template(messages(task, text), tokenize=False) + header for text in texts]
     scores = []
     with torch.no_grad():
         for start in range(0, len(prompts), 8):
             batch = tokenizer(prompts[start:start + 8], return_tensors="pt", padding=True,
                               add_special_tokens=False).to(model.device)
-            logits = model(**batch).logits[:, -1, [yes_id, no_id]].float()
-            scores += torch.softmax(logits, dim=-1)[:, 0].tolist()
+            model(**batch, logits_to_keep=1)
+            scores += torch.softmax(seen["last"] @ head.T, dim=-1)[:, 0].tolist()
+    hook.remove()
     return scores
 
 
 # Local side: the data in, the results out ------------------------------------------------------------------------------
-def examples(describer: str, captions: bool) -> tuple[list[dict], list[dict], list[dict]]:
-    """Training Reels, held-out Reels, and the pair test, from local files."""
+def reel_texts(describer: str, captions: bool) -> tuple[dict[str, str], dict[str, dict]]:
+    """Every described Reel's text as the model reads it, and the dataset rows."""
     from preflight.dataset import OUT as DATASET
     from preflight.describe import as_text, load_descriptions
-    from preflight.pairs import held_out, load_pairs
 
     forms = load_descriptions(describer)
-    rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
-    pairs = load_pairs("held-out", rows)
-    train_rows, test_rows = [], []
+    rows = {row["id"]: row for row in map(json.loads, DATASET.open()) if row["id"] in forms}
+    texts = {}
+    for media_id, row in rows.items():
+        texts[media_id] = as_text(forms[media_id]) + (f"\nCaption: {row['caption'] or '(none)'}" if captions else "")
+    return texts, rows
+
+
+def pair_text(texts: dict[str, str], a: str, b: str) -> str:
+    return f"Reel A\n{texts[a]}\n\nReel B\n{texts[b]}"
+
+
+def training_pairs(rows: dict[str, dict], per_account: int) -> list[tuple[str, str]]:
+    """(better, worse) from the training accounts, drawn like the test pairs."""
+    from preflight.pairs import GAP, SEED, held_out
+
+    rng, by_account = random.Random(SEED), defaultdict(list)
     for row in rows.values():
-        if row["id"] not in forms:
-            continue
-        text = as_text(forms[row["id"]])
-        if captions:
-            text += f"\nCaption: {row['caption'] or '(none)'}"
-        example = {"id": row["id"], "account": row["username"], "text": text,
-                   "answer": "Yes" if row["beats_median"] else "No"}
-        (test_rows if held_out(row["username"]) else train_rows).append(example)
-    return train_rows, test_rows, [pair for pair in pairs if pair["a"] in forms and pair["b"] in forms]
+        if not held_out(row["username"]):
+            by_account[row["username"]].append(row)
+    pairs = []
+    for account in sorted(by_account):
+        reels = by_account[account]
+        candidates = [(hit["id"], miss["id"]) for hit in reels if hit["beats_median"] for miss in reels
+                      if not miss["beats_median"] and hit["ratio"] >= GAP * miss["ratio"]]
+        rng.shuffle(candidates)
+        pairs += candidates[:per_account]
+    return pairs
 
 
 @app.local_entrypoint()
-def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "tiny", captions: bool = False,
-         epochs: float = 1.0, limit: int = 0):
+def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "tiny", task: str = "pairwise",
+         captions: bool = False, epochs: float = 1.0, learning_rate: float = 1e-4, per_account: int = 15,
+         baseline: bool = True, retrain: bool = True, limit: int = 0):
     from sklearn.metrics import roc_auc_score
 
     from preflight.dataset import OUT as DATASET
-    from preflight.pairs import wilson
+    from preflight.pairs import held_out, load_pairs, wilson
 
     model_id = MODELS[model]
-    train_rows, test_rows, pairs = examples(describer, captions)
-    if run == "smoke" or limit:
-        train_rows, test_rows, pairs = train_rows[:limit or 64], test_rows[:limit or 32], pairs[:16]
-    print(f"{len(train_rows)} training Reels, {len(test_rows)} held out from {len({r['account'] for r in test_rows})} "
-          f"accounts, {len(pairs)} pairs; {model_id}")
-    fetch.remote(model_id)
-    trained = train.remote(run, model_id, train_rows, epochs)
-    print(f"trained: loss {trained['train_loss']:.3f}, {trained['steps']} steps, {trained['minutes']} min")
+    texts, rows = reel_texts(describer, captions)
+    test_pairs = [pair for pair in load_pairs("held-out", rows) if pair["a"] in texts and pair["b"] in texts]
+    smoke = run == "smoke" or limit
+    if task == "pairwise":
+        train_examples = [example for better, worse in training_pairs(rows, per_account)
+                          for example in ({"text": pair_text(texts, better, worse), "answer": "A"},
+                                          {"text": pair_text(texts, worse, better), "answer": "B"})]
+        # Each test pair both ways round, so a lean towards A or B cancels out.
+        test_texts = [pair_text(texts, pair[x], pair[y]) for pair in test_pairs for x, y in (("a", "b"), ("b", "a"))]
+    else:
+        train_examples = [{"text": texts[media_id], "answer": "Yes" if row["beats_median"] else "No"}
+                          for media_id, row in rows.items() if not held_out(row["username"])]
+        test_ids = sorted({media_id for media_id, row in rows.items() if held_out(row["username"])})
+        test_texts = [texts[media_id] for media_id in test_ids]
+    random.Random(0).shuffle(train_examples)
+    if smoke:
+        train_examples, test_pairs = train_examples[:limit or 64], test_pairs[:16]
+        if task == "pairwise":
+            test_texts = test_texts[:2 * len(test_pairs)]
+    print(f"{len(train_examples)} training examples ({task}); {len(test_pairs)} held-out pairs from "
+          f"{len({pair['account'] for pair in test_pairs})} accounts; {model_id}")
+    trained = None
+    if retrain:  # --no-retrain scores the adapter already saved under this run's name
+        fetch.remote(model_id)
+        trained = train.remote(run, model_id, task, train_examples, epochs, learning_rate)
+        print(f"trained: loss {trained['train_loss']:.3f}, {trained['steps']} steps, {trained['minutes']} min")
 
-    needed = {row["id"]: row for row in test_rows}
-    texts = {row["id"]: row["text"] for row in examples(describer, captions)[1]}  # every held-out Reel
-    ids = sorted(needed | {pair[side]: None for pair in pairs for side in ("a", "b")})
-    probability = dict(zip(ids, score.remote(run, model_id, [texts[i] for i in ids])))
+    def evaluate(adapter: str | None) -> dict:
+        probabilities = score.remote(adapter, model_id, task, test_texts)
+        if task == "pairwise":
+            # P(the first-shown Reel is better), averaged over both orders: (P(A | a,b) + P(B | b,a)) / 2.
+            chances = [(probabilities[2 * i] + 1 - probabilities[2 * i + 1]) / 2 for i in range(len(test_pairs))]
+            right = sum((chance > 0.5) == (pair["better"] == "A") for chance, pair in zip(chances, test_pairs))
+            one_order = sum((probabilities[2 * i] > 0.5) == (pair["better"] == "A")
+                            for i, pair in enumerate(test_pairs))
+            return {"pairs_right": right, "one_order_right": one_order, "pairs": len(test_pairs),
+                    "interval": wilson(right, len(test_pairs)), "spread": [min(probabilities), max(probabilities)],
+                    "chances": chances}
+        by_id = dict(zip(test_ids, probabilities))
+        right = sum((by_id[pair["a"]] > by_id[pair["b"]]) == (pair["better"] == "A") for pair in test_pairs)
+        truth = [rows[media_id]["beats_median"] for media_id in test_ids]
+        return {"pairs_right": right, "pairs": len(test_pairs), "interval": wilson(right, len(test_pairs)),
+                "held_out_auc": roc_auc_score(truth, probabilities) if len(set(truth)) > 1 else None,
+                "spread": [min(probabilities), max(probabilities)], "probabilities": by_id}
 
-    truth = {row["id"]: row["answer"] == "Yes" for row in test_rows}
-    auc = roc_auc_score([truth[i] for i in truth], [probability[i] for i in truth]) if len(set(truth.values())) > 1 \
-        else None
-    right = sum((probability[pair["a"]] > probability[pair["b"]]) == (pair["better"] == "A") for pair in pairs)
-    low, high = wilson(right, len(pairs))
-    result = {"run": run, "model": model_id, "describer": describer, "captions": captions, "train": trained,
-              "held_out_auc": auc, "pairs_right": right, "pairs": len(pairs), "pairs_interval": [low, high],
-              "probabilities": probability}
-    out = DATASET.parent / "finetune" / f"{run}.json"
+    results = {"tuned": evaluate(run)}
+    if baseline:
+        results["as it comes"] = evaluate(None)
+    out = DATASET.parent / "finetune" / f"{run}{'' if retrain else '-rescored'}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=1))
-    auc_text = f"{auc:.3f}" if auc is not None else "n/a"
-    print(f"held-out accounts, beats its usual: ROC AUC {auc_text}; pair test: {right}/{len(pairs)} = "
-          f"{right / max(len(pairs), 1):.0%} (95%: {low:.0%}-{high:.0%}); written to {out}")
+    out.write_text(json.dumps({"run": run, "model": model_id, "task": task, "describer": describer,
+                               "captions": captions, "train": trained, **results}, indent=1))
+    for name, result in results.items():
+        low, high = result["interval"]
+        extra = f"; held-out AUC {result['held_out_auc']:.3f}" if result.get("held_out_auc") is not None else ""
+        print(f"{name}: pair test {result['pairs_right']}/{result['pairs']} = "
+              f"{result['pairs_right'] / max(result['pairs'], 1):.0%} (95%: {low:.0%}-{high:.0%}); "
+              f"probabilities {result['spread'][0]:.3f}-{result['spread'][1]:.3f}{extra}")
+    print(f"written to {out}")
