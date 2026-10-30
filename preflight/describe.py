@@ -2,6 +2,7 @@
 
     uv run python -m preflight.describe pilot [--n 12] [--with codex:gpt-6-luna claude:sonnet]
     uv run python -m preflight.describe run [--with codex:gpt-6-luna[:effort]] [--workers 3] [--hours 10]
+                                            [--sample N | --pairs 15]
     uv run python -m preflight.describe prepare [--workers 3] [--hours 10]
 
 **What the describer gets.** The Reel's first five seconds as ten frames, one
@@ -18,8 +19,10 @@ openings of one, three and five seconds can be compared from one description:
 
 **Who describes.** A CLI agent on the user's own subscriptions, `codex exec`
 or `claude -p`, so a description costs allowance rather than money; Codex is
-the cheaper of the two (the user, 2026-10-28). Muse Spark can take over once
-the Meta API credit is in.
+the cheaper of the two (the user, 2026-10-28). Muse Spark
+(`--with meta:muse-spark-1.3:low`) takes over now that the Meta API credit is
+in (2026-10-30). At about $0.012 an opening, all of them would come near the
+budget, so `--pairs` describes only the Reels the pair runs read.
 """
 import argparse
 import base64
@@ -432,6 +435,21 @@ def in_order() -> list[str]:
                   key=lambda media_id: hashlib.sha256(media_id.encode()).hexdigest())
 
 
+def for_pairs(per_account: int) -> list[str]:
+    """Only the Reels a pair run reads, for a describer that costs money: the
+    held-out pairs' first, so the zero-shot judges can start on them, then
+    those in the training pairs `preflight.finetune` draws from the openings
+    prepared so far."""
+    from preflight.dataset import OUT as DATASET
+    from preflight.finetune import training_pairs
+    from preflight.pairs import PAIRS
+
+    held = json.loads((PAIRS / "held-out" / "pairs.json").read_text())["pairs"]
+    first = sorted({pair[side] for pair in held for side in ("a", "b")})
+    rows = {row["id"]: row for row in map(json.loads, DATASET.open()) if (OPENINGS / f"{row['id']}.json").exists()}
+    return first + sorted({media_id for pair in training_pairs(rows, per_account) for media_id in pair} - set(first))
+
+
 def prepare_all(workers: int, deadline: float) -> None:
     """Every opening's sheet and sound made ahead, here on the CPU, so a
     describer that costs money only has to read them, and every one is heard
@@ -462,8 +480,9 @@ def prepare_all(workers: int, deadline: float) -> None:
     log(f"done: {dict(counts)}")
 
 
-def run(describer: str, workers: int, deadline: float, sample: int | None) -> None:
-    todo = [media_id for media_id in in_order()[:sample] if not description_path(describer, media_id).exists()]
+def run(describer: str, workers: int, deadline: float, sample: int | None, pairs: int | None = None) -> None:
+    order = for_pairs(pairs) if pairs is not None else in_order()[:sample]
+    todo = [media_id for media_id in order if not description_path(describer, media_id).exists()]
     log(f"{len(todo)} openings to describe with {describer}")
     stop, counts = threading.Event(), Counter()
 
@@ -500,6 +519,9 @@ def main() -> int:
     full.add_argument("--workers", type=int, default=3)
     full.add_argument("--hours", type=float, default=10)
     full.add_argument("--sample", type=int, help="only the first N Reels of the fixed order")
+    full.add_argument("--pairs", type=int, metavar="PER_ACCOUNT",
+                      help="only the Reels of the held-out pairs and of the training pairs, PER_ACCOUNT an account "
+                           "(0: the held-out pairs' alone)")
     ahead = commands.add_parser("prepare")
     ahead.add_argument("--workers", type=int, default=3)
     ahead.add_argument("--hours", type=float, default=10)
@@ -510,7 +532,7 @@ def main() -> int:
     elif args.command == "prepare":
         prepare_all(args.workers, time.time() + args.hours * 3600)
     else:
-        run(args.describer, args.workers, time.time() + args.hours * 3600, args.sample)
+        run(args.describer, args.workers, time.time() + args.hours * 3600, args.sample, args.pairs)
     return 0
 
 
