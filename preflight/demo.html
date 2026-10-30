@@ -55,8 +55,14 @@
   .headline { font-size: 34px; font-weight: 750; letter-spacing: -0.02em; margin: 0; }
   .headline b { color: var(--win); }
   .sub { color: var(--muted); margin: 2px 0 16px; }
-  .meter { height: 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; margin-bottom: 6px; }
-  .meter div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-2), var(--win)); transition: width .8s ease; }
+  .bands { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; max-width: 420px; height: 110px; margin: 26px 0 4px; }
+  .band { display: flex; flex-direction: column; justify-content: flex-end; }
+  .band .bar { height: 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px 8px 3px 3px; transition: height .8s ease; display: flex; justify-content: center; }
+  .band .bar b { font-size: 12px; font-weight: 650; color: var(--muted); margin-top: -20px; }
+  .band.this .bar { background: linear-gradient(180deg, var(--win), var(--accent-2)); border-color: var(--win); }
+  .band.this .bar b { color: var(--win); }
+  .band-labels { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; max-width: 420px; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .band-labels span:last-child { text-align: right; }
   .chance { font-size: 13px; color: var(--muted); margin: 0 0 18px; }
   .reasons { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .reasons div { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
@@ -122,7 +128,11 @@
   <section id="verdict" hidden>
     <p class="headline" id="headline"></p>
     <p class="sub" id="sub"></p>
-    <div id="meter" hidden><div class="meter"><div id="fill"></div></div><p class="chance" id="chance"></p></div>
+    <div id="meter" hidden>
+      <div class="bands" id="bands"></div>
+      <div class="band-labels"><span>least sure</span><span></span><span></span><span>surest</span></div>
+      <p class="chance" id="chance"></p>
+    </div>
     <div class="reasons">
       <div><h3>Why</h3><p id="why">…</p></div>
       <div><h3 id="lift-head">To lift the other</h3><p id="lift">…</p></div>
@@ -241,14 +251,19 @@ function showVerdict(verdict) {
     ? `Read both ways round, the judge contradicted itself. It leans to opening ${better}.`
     : `Opening ${better} is likely to beat opening ${other} on this account.`;
   for (const side of SIDES) slot(side).classList.toggle('win', !verdict.close && side.toUpperCase() === better);
-  // How often calls like this one were right in testing, not the judge's own (overconfident) probability.
-  const record = config.record?.[verdict.close ? 'close' : 'firm'];
-  $('meter').hidden = !record;
-  if (record) {
-    const share = Math.round(100 * record.right / record.pairs);
-    requestAnimationFrame(() => $('fill').style.width = `${share}%`);
-    $('chance').textContent = `Calls this ${verdict.close ? 'close' : 'firm'} were right ${record.right} of `
-      + `${record.pairs} times (${share}%) on accounts it never saw.`;
+  // How often calls about as sure as this one were right in testing, not the judge's own (overconfident) probability.
+  const bands = config.record?.bands;
+  $('meter').hidden = !bands || verdict.sureness === undefined;
+  if (!$('meter').hidden) {
+    const at = Math.max(0, bands.findLastIndex(band => band.from <= verdict.sureness));
+    const share = band => Math.round(100 * band.right / band.pairs);
+    $('bands').innerHTML = bands.map((band, index) =>
+      `<div class="band${index === at ? ' this' : ''}"><div class="bar" data-share="${share(band)}"><b>${share(band)}%</b></div></div>`
+    ).join('');
+    requestAnimationFrame(() => requestAnimationFrame(() =>
+      $('bands').querySelectorAll('.bar').forEach(bar => bar.style.height = `${bar.dataset.share}%`)));
+    $('chance').textContent = `Calls this sure were right ${bands[at].right} of ${bands[at].pairs} times `
+      + `(${share(bands[at])}%) on accounts it never saw. A coin toss would be right half the time.`;
   }
   $('why').textContent = verdict.why ?? '…';
   $('lift-head').textContent = `To lift ${other}`;

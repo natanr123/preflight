@@ -17,10 +17,13 @@ why and what could lift the other one.
 round and averages the two, as in its test. Its own probability is not shown:
 trained to near-zero loss, it is all but certain of nearly every pair (172 of
 207 held-out pairs at 99% or more for `pairs-luna-3ep`, right on 69% of
-them). The page says instead how often calls like this one were right on the
-held-out pairs, and when the two readings contradict each other, that it is
-too close to call. Any other judge is a model asked zero-shot, the way the
-pair test asks it (`preflight.pairs.PROMPT`).
+them). How sure it is still ranks its calls, though: split by it into
+quarters, `pairs-luna-3ep` got 29 of 51 held-out pairs right in its least sure
+quarter and 42 of 52 in its surest. So the page quotes a call the record of
+the held-out calls about as sure as it (`BANDS`), and when the two readings
+contradict each other, says it is too close to call. Any other judge is a
+model asked zero-shot, the way the pair test asks it
+(`preflight.pairs.PROMPT`).
 
 **Stand-ins.** Until the Meta credit is in, the defaults run on the user's own
 subscriptions. The real thing is `--describer meta:muse-spark-1.3 --judge
@@ -53,6 +56,9 @@ SIDES = ("a", "b")
 #: pair contradict each other (each all but certain, the other way round). On
 #: the held-out pairs these were coin tosses: 11 of 22 right for `pairs-luna-3ep`.
 CLOSE = 0.1
+#: The held-out pairs in this many equal bands, from the fine-tuned judge's
+#: least sure calls to its surest, each band with its own record.
+BANDS = 4
 
 EXPLAIN = """\
 Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight {expects}
@@ -131,7 +137,8 @@ def judge(judge: str, forms: dict[str, dict]) -> dict:
         rate = modal.Cls.from_name("preflight", "Judge")(run=judge.split(":", 1)[1]).rate
         a_first, b_first = rate.remote([pair_text(texts, "a", "b"), pair_text(texts, "b", "a")])
         chance = (a_first + 1 - b_first) / 2  # that A does better, read both ways round
-        return {"better": "A" if chance > 0.5 else "B", "close": abs(chance - 0.5) < CLOSE}
+        return {"better": "A" if chance > 0.5 else "B", "close": abs(chance - 0.5) < CLOSE,
+                "sureness": abs(chance - 0.5)}
     answer, _ = ask(judge, PROMPT.format(captions="", frames="", a=texts["a"], b=texts["b"]), VERDICT)
     return {"better": answer["better"], "close": False}
 
@@ -164,7 +171,8 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
 
 def track_record(judge: str, describer: str) -> dict | None:
     """How the judge did on the held-out pairs, for the page to quote: in all,
-    and for a fine-tuned judge, apart on its firm and its close calls."""
+    and for a fine-tuned judge, in `BANDS` bands by how sure it was, least sure
+    first, each with the least sureness in it."""
     if judge.startswith("glimmer:"):
         path = DEMO.parent / "finetune" / f"{judge.split(':', 1)[1]}.json"
         if not path.exists():
@@ -173,10 +181,11 @@ def track_record(judge: str, describer: str) -> dict | None:
         record = {"right": tuned["pairs_right"], "pairs": tuned["pairs"]}
         if "better" not in tuned:  # scored before the answers were kept with the chances
             return record
-        for kind, close in (("firm", False), ("close", True)):
-            calls = [(chance > 0.5) == (better == "A") for chance, better in zip(tuned["chances"], tuned["better"])
-                     if (abs(chance - 0.5) < CLOSE) == close]
-            record[kind] = {"right": sum(calls), "pairs": len(calls)}
+        calls = sorted(((abs(chance - 0.5), (chance > 0.5) == (better == "A"))
+                        for chance, better in zip(tuned["chances"], tuned["better"])), key=lambda call: call[0])
+        bands = [calls[len(calls) * band // BANDS:len(calls) * (band + 1) // BANDS] for band in range(BANDS)]
+        record["bands"] = [{"from": band[0][0], "right": sum(right for _, right in band), "pairs": len(band)}
+                           for band in bands]
         return record
     folder = verdict_path("held-out", judge, describer, False, {"a": "", "b": ""}).parent
     records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
