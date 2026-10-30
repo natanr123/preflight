@@ -4,6 +4,8 @@ reads their written-down openings.
     uv run python -m preflight.pairs run --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna [--caption]
                                          [--first-frames] [--sound]
     uv run python -m preflight.pairs report --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna
+    uv run python -m preflight.pairs compare --judge glimmer:pairs-spark --against meta:muse-spark-1.3:medium
+                                             --describer meta:muse-spark-1.3:low
 
 **Why.** It is the product's question: of two openings, which will do better
 for this account? Comparing within one account leaves out what differs between
@@ -197,6 +199,45 @@ def report(name: str, judge: str, describer: str, captions: bool, frames: bool =
         f"said A {first / n:.0%} of the time, from {len({record['account'] for record in records})} accounts")
 
 
+def rights(name: str, judge: str, describer: str) -> dict[tuple[str, str], bool]:
+    """Whether the judge picked the better Reel, pair by pair: a zero-shot
+    judge's from its verdicts, a fine-tuned one's (`glimmer:<run>`) from its
+    run's chances, which follow the pairs its describer wrote both Reels of."""
+    if judge.startswith("glimmer:"):
+        result = json.loads((DATASET.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").read_text())
+        described = load_descriptions(result["describer"])
+        pairs = [pair for pair in load_pairs(name, {}) if pair["a"] in described and pair["b"] in described]
+        tuned = result["tuned"]
+        if [pair["better"] for pair in pairs] != tuned.get("better", [pair["better"] for pair in pairs]):
+            raise ValueError(f"{judge} was scored on other pairs")
+        return {(pair["a"], pair["b"]): (chance > 0.5) == (pair["better"] == "A")
+                for pair, chance in zip(pairs, tuned["chances"], strict=True)}
+    folder = verdict_path(name, judge, describer, False, {"a": "", "b": ""}).parent
+    return {(record["a"], record["b"]): record["right"]
+            for record in (json.loads(path.read_text()) for path in folder.glob("*.json"))}
+
+
+def compare(name: str, judge: str, other: str, describer: str) -> None:
+    """Two judges on the pairs both answered: how many only one of them got
+    right, and how likely a split that uneven is if they are equally good
+    (McNemar's exact test). Where they agree, how often they are right."""
+    mine, theirs = rights(name, judge, describer), rights(name, other, describer)
+    pairs = mine.keys() & theirs.keys()
+    if not pairs:
+        log(f"{name}: no pairs that {judge} and {other} (reading {describer}) both answered")
+        return
+    alone, others_alone = (sum(first[pair] and not second[pair] for pair in pairs)
+                           for first, second in ((mine, theirs), (theirs, mine)))
+    split = alone + others_alone
+    p = min(1.0, 2 * sum(math.comb(split, k) for k in range(min(alone, others_alone) + 1)) / 2 ** split)
+    agree = len(pairs) - split
+    right = sum(mine[pair] and theirs[pair] for pair in pairs)
+    log(f"{name}: {judge} against {other} on {len(pairs)} pairs: right on {sum(mine[pair] for pair in pairs)} "
+        f"against {sum(theirs[pair] for pair in pairs)}; only {judge} right on {alone}, only {other} on "
+        f"{others_alone} (McNemar p = {p:.2f}); they pick the same Reel in {agree} pairs and are right on "
+        f"{right} of them ({right / max(agree, 1):.0%})")
+
+
 def run(name: str, judge: str, describer: str, captions: bool, workers: int, limit: int | None,
         frames: bool = False, sound: bool = False) -> None:
     rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
@@ -232,8 +273,9 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["run", "report"])
+    parser.add_argument("command", choices=["run", "report", "compare"])
     parser.add_argument("--judge", default="codex:gpt-6.1-sol:medium")
+    parser.add_argument("--against", help="compare: the judge to set against --judge, on the same describer")
     parser.add_argument("--set", dest="name", default="held-out", help="which pairs (held-out, sol-sample)")
     parser.add_argument("--describer", default="codex:gpt-6-luna", help="whose descriptions the judge reads")
     parser.add_argument("--caption", dest="captions", action="store_true", help="show each Reel's caption too")
@@ -244,6 +286,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "run":
         run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit, args.frames, args.sound)
+    elif args.command == "compare":
+        compare(args.name, args.judge, args.against, args.describer)
     else:
         report(args.name, args.judge, args.describer, args.captions, args.frames, args.sound)
     return 0
