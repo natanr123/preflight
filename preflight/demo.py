@@ -1,7 +1,8 @@
 """PreFlight's demo: two openings in; which will do better on the account, and why.
 
-    uv run python -m preflight.demo [--describer codex:gpt-6-luna] [--judge codex:gpt-6.1-sol:medium]
-                                    [--explainer codex:gpt-6.1-sol:medium] [--port 8008]
+    uv run python -m preflight.demo [--describer meta:muse-spark-1.3:low] [--judge glimmer:pairs-spark]
+                                    [--second meta:muse-spark-1.3:medium] [--explainer meta:muse-spark-1.3:medium]
+                                    [--port 8008]
 
 **What it does.** You drop in two videos you might post on one account: two
 takes of a Reel, or two different Reels. Each one's start is shrunk the way
@@ -13,22 +14,24 @@ says which will do better against the account's usual, and the explainer says
 why and what could lift the other one.
 
 **Judges.** `glimmer:<run>` is the fine-tuned Muse Glimmer on Modal
-(`preflight.finetune.Judge`, deployed first). It reads the pair both ways
-round and averages the two, as in its test. Its own probability is not shown:
-trained to near-zero loss, it is all but certain of nearly every pair (172 of
-207 held-out pairs at 99% or more for `pairs-luna-3ep`, right on 69% of
-them). How sure it is still ranks its calls, though: split by it into
-quarters, `pairs-luna-3ep` got 29 of 51 held-out pairs right in its least sure
-quarter and 42 of 52 in its surest. So the page quotes a call the record of
-the held-out calls about as sure as it (`BANDS`), and when the two readings
-contradict each other, says it is too close to call. Any other judge is a
-model asked zero-shot, the way the pair test asks it
-(`preflight.pairs.PROMPT`).
+(`preflight.finetune.Judge`, deployed first), reading the describer its
+adapter was trained on. It reads the pair both ways round and averages the
+two, as in its test. Its own probability is not shown: trained to near-zero
+loss, it is all but certain of nearly every pair (162 of 207 held-out pairs at
+99% or more for `pairs-spark`, right on 68% of them). How sure it is still
+ranks its calls, though: split by it into quarters, `pairs-spark` got 25 of 51
+held-out pairs right in its least sure quarter and 38 of 52 in its surest. So
+the page quotes a call the record of the held-out calls about as sure as it
+(`BANDS`). Any other judge is a model asked zero-shot, the way the pair test
+asks it (`preflight.pairs.PROMPT`).
 
-**Stand-ins.** Until the Meta credit is in, the defaults run on the user's own
-subscriptions. The real thing is `--describer meta:muse-spark-1.3 --judge
-glimmer:<run> --explainer meta:muse-spark-1.3`, with the describer the
-judge's adapter was trained on.
+**A second judge.** Glimmer fine-tuned and Muse Spark zero-shot are about as
+good (133 and 135 of the 207 held-out pairs) but right on different pairs, so
+`--second` asks Muse Spark too, alongside. Where the two picked the same Reel
+they were right on 95 of 129 held-out pairs (74%), and on 55 of 68 when
+Glimmer was also surer than on half of them; where they differed, on 38 of 78,
+a coin toss. So the page calls those too close, and quotes each call the
+record of its kind (`LEVELS`).
 
 **Cached.** An opening is kept by its file's hash (`data/demo/<hash>/`),
 with each describer's form, so showing the same videos again costs nothing.
@@ -45,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from preflight.describe import SECONDS, as_text, ask, log, opening, write_down
-from preflight.pairs import PROMPT, VERDICT, verdict_path
+from preflight.pairs import PROMPT, VERDICT, rights, tuned_chances, verdict_path
 from preflight.store import DEFAULT_PATH
 from preflight.videos import shrink
 
@@ -54,11 +57,15 @@ PAGE = Path(__file__).with_name("demo.html")
 SIDES = ("a", "b")
 #: A fine-tuned judge's chance this near a half means its two readings of the
 #: pair contradict each other (each all but certain, the other way round). On
-#: the held-out pairs these were coin tosses: 11 of 22 right for `pairs-luna-3ep`.
+#: the held-out pairs: 11 of 22 right for `pairs-luna-3ep`, 9 of 13 for `pairs-spark`.
 CLOSE = 0.1
 #: The held-out pairs in this many equal bands, from the fine-tuned judge's
 #: least sure calls to its surest, each band with its own record.
 BANDS = 4
+#: With a second judge, the kinds of call, each with its own record: the two
+#: pick different Reels; the same, with the fine-tuned judge less sure than on
+#: half the held-out pairs; the same, and it surer.
+LEVELS = ("disagree", "agree", "agree, sure")
 
 EXPLAIN = """\
 Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight {expects}
@@ -143,6 +150,19 @@ def judge(judge: str, forms: dict[str, dict]) -> dict:
     return {"better": answer["better"], "close": False}
 
 
+def decide(config: dict, forms: dict[str, dict]) -> dict:
+    """The judge's call; with a second judge, asked at the same time, which of
+    `LEVELS` the two calls make, and too close to call when they differ."""
+    judges = [config["judge"]] + ([config["second"]] if config["second"] else [])
+    with ThreadPoolExecutor(len(judges)) as pool:
+        call, *second = pool.map(lambda name: judge(name, forms), judges)
+    if not second:
+        return call
+    agree, sure_from = second[0]["better"] == call["better"], (config["record"] or {}).get("sure_from")
+    sure = sure_from is not None and call.get("sureness", 0) >= sure_from
+    return call | {"second": second[0]["better"], "close": not agree, "level": 2 if agree and sure else int(agree)}
+
+
 def explain(explainer: str, forms: dict[str, dict], verdict: dict) -> dict:
     better = verdict["better"]
     prompt = EXPLAIN.format(expects="finds the two close, but leans to" if verdict["close"] else "expects",
@@ -158,7 +178,7 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
             forms = dict(zip(SIDES, pool.map(
                 lambda side: ready(uploads[side], config["describer"], state["openings"][side]), SIDES)))
         update(state, stage="judging")
-        verdict = judge(config["judge"], forms)
+        verdict = decide(config, forms)
         update(state, stage="explaining", verdict=verdict)
         update(state, stage="done", verdict=verdict | explain(config["explainer"], forms, verdict))
     except Exception as error:  # shown on the page, and the server carries on
@@ -169,27 +189,31 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
             upload.unlink(missing_ok=True)
 
 
-def track_record(judge: str, describer: str) -> dict | None:
+def track_record(judge: str, describer: str, second: str | None) -> dict | None:
     """How the judge did on the held-out pairs, for the page to quote: in all,
     and for a fine-tuned judge, in `BANDS` bands by how sure it was, least sure
-    first, each with the least sureness in it."""
-    if judge.startswith("glimmer:"):
-        path = DEMO.parent / "finetune" / f"{judge.split(':', 1)[1]}.json"
-        if not path.exists():
-            return None
-        tuned = json.loads(path.read_text())["tuned"]
-        record = {"right": tuned["pairs_right"], "pairs": tuned["pairs"]}
-        if "better" not in tuned:  # scored before the answers were kept with the chances
-            return record
-        calls = sorted(((abs(chance - 0.5), (chance > 0.5) == (better == "A"))
-                        for chance, better in zip(tuned["chances"], tuned["better"])), key=lambda call: call[0])
-        bands = [calls[len(calls) * band // BANDS:len(calls) * (band + 1) // BANDS] for band in range(BANDS)]
-        record["bands"] = [{"from": band[0][0], "right": sum(right for _, right in band), "pairs": len(band)}
-                           for band in bands]
-        return record
-    folder = verdict_path("held-out", judge, describer, False, {"a": "", "b": ""}).parent
-    records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
-    return {"right": sum(record["right"] for record in records), "pairs": len(records)} if records else None
+    first, each with the least sureness in it; with a second judge too, by
+    `LEVELS`, with the sureness that makes a call sure."""
+    if not judge.startswith("glimmer:"):
+        folder = verdict_path("held-out", judge, describer, False, {"a": "", "b": ""}).parent
+        records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
+        return {"right": sum(record["right"] for record in records), "pairs": len(records)} if records else None
+    if not (DEMO.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").exists():
+        return None
+    chances, right = tuned_chances("held-out", judge), rights("held-out", judge, describer)
+    record = {"right": sum(right.values()), "pairs": len(right)}
+    calls = sorted(((abs(chances[pair] - 0.5), right[pair]) for pair in right), key=lambda call: call[0])
+    bands = [calls[len(calls) * band // BANDS:len(calls) * (band + 1) // BANDS] for band in range(BANDS)]
+    record["bands"] = [{"from": band[0][0], "right": sum(hit for _, hit in band), "pairs": len(band)}
+                       for band in bands]
+    if second:
+        theirs, sure_from = rights("held-out", second, describer), calls[len(calls) // 2][0]
+        levels = [[] for _ in LEVELS]
+        for pair in right.keys() & theirs.keys():  # two answers to a pair agree when both are right or both wrong
+            agree = right[pair] == theirs[pair]
+            levels[2 if agree and abs(chances[pair] - 0.5) >= sure_from else int(agree)].append(right[pair])
+        record |= {"sure_from": sure_from, "levels": [{"right": sum(level), "pairs": len(level)} for level in levels]}
+    return record
 
 
 def serve(config: dict, port: int) -> None:
@@ -203,9 +227,11 @@ def serve(config: dict, port: int) -> None:
     def page() -> str:
         return PAGE.read_text()
 
+    config["record"] = track_record(config["judge"], config["describer"], config["second"])
+
     @app.get("/api/config")
     def settings() -> dict:
-        return config | {"record": track_record(config["judge"], config["describer"])}
+        return config
 
     @app.post("/api/compare")
     def start(a: UploadFile, b: UploadFile) -> dict:
@@ -235,18 +261,21 @@ def serve(config: dict, port: int) -> None:
         return FileResponse(DEMO / key / "sheet.jpg")
 
     log(f"PreFlight on http://127.0.0.1:{port} (describer {config['describer']}, judge {config['judge']}, "
-        f"explainer {config['explainer']})")
+        f"second judge {config['second']}, explainer {config['explainer']})")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--describer", default="codex:gpt-6-luna")
-    parser.add_argument("--judge", default="codex:gpt-6.1-sol:medium")
-    parser.add_argument("--explainer", default="codex:gpt-6.1-sol:medium")
+    parser.add_argument("--describer", default="meta:muse-spark-1.3:low")
+    parser.add_argument("--judge", default="glimmer:pairs-spark")
+    parser.add_argument("--second", default="meta:muse-spark-1.3:medium", help="a zero-shot judge asked alongside; "
+                        "'none' for the judge alone")
+    parser.add_argument("--explainer", default="meta:muse-spark-1.3:medium")
     parser.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
-    serve({"describer": args.describer, "judge": args.judge, "explainer": args.explainer}, args.port)
+    serve({"describer": args.describer, "judge": args.judge, "second": None if args.second == "none" else args.second,
+           "explainer": args.explainer}, args.port)
     return 0
 
 

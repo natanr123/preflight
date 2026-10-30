@@ -199,19 +199,25 @@ def report(name: str, judge: str, describer: str, captions: bool, frames: bool =
         f"said A {first / n:.0%} of the time, from {len({record['account'] for record in records})} accounts")
 
 
+def tuned_chances(name: str, judge: str) -> dict[tuple[str, str], float]:
+    """A fine-tuned judge's (`glimmer:<run>`) chance that Reel A did better,
+    pair by pair, from its run, whose chances follow the pairs its describer
+    wrote both Reels of."""
+    result = json.loads((DATASET.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").read_text())
+    described = load_descriptions(result["describer"])
+    pairs = [pair for pair in load_pairs(name, {}) if pair["a"] in described and pair["b"] in described]
+    tuned = result["tuned"]
+    if [pair["better"] for pair in pairs] != tuned.get("better", [pair["better"] for pair in pairs]):
+        raise ValueError(f"{judge} was scored on other pairs")
+    return {(pair["a"], pair["b"]): chance for pair, chance in zip(pairs, tuned["chances"], strict=True)}
+
+
 def rights(name: str, judge: str, describer: str) -> dict[tuple[str, str], bool]:
     """Whether the judge picked the better Reel, pair by pair: a zero-shot
-    judge's from its verdicts, a fine-tuned one's (`glimmer:<run>`) from its
-    run's chances, which follow the pairs its describer wrote both Reels of."""
+    judge's from its verdicts, a fine-tuned one's from its chances."""
     if judge.startswith("glimmer:"):
-        result = json.loads((DATASET.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").read_text())
-        described = load_descriptions(result["describer"])
-        pairs = [pair for pair in load_pairs(name, {}) if pair["a"] in described and pair["b"] in described]
-        tuned = result["tuned"]
-        if [pair["better"] for pair in pairs] != tuned.get("better", [pair["better"] for pair in pairs]):
-            raise ValueError(f"{judge} was scored on other pairs")
-        return {(pair["a"], pair["b"]): (chance > 0.5) == (pair["better"] == "A")
-                for pair, chance in zip(pairs, tuned["chances"], strict=True)}
+        better = {(pair["a"], pair["b"]): pair["better"] for pair in load_pairs(name, {})}
+        return {pair: (chance > 0.5) == (better[pair] == "A") for pair, chance in tuned_chances(name, judge).items()}
     folder = verdict_path(name, judge, describer, False, {"a": "", "b": ""}).parent
     return {(record["a"], record["b"]): record["right"]
             for record in (json.loads(path.read_text()) for path in folder.glob("*.json"))}
