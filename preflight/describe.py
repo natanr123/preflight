@@ -437,15 +437,18 @@ def in_order() -> list[str]:
 
 def for_pairs(per_account: int) -> list[str]:
     """Only the Reels a pair run reads, for a describer that costs money: the
-    held-out pairs' first, so the zero-shot judges can start on them, then
-    those in the training pairs `preflight.finetune` draws from the openings
-    prepared so far."""
+    test pairs' first (`held-out`, then `fresh`), so the zero-shot judges can
+    start on them, then those in the training pairs `preflight.finetune` draws
+    from the openings prepared so far."""
     from preflight.dataset import OUT as DATASET
     from preflight.finetune import training_pairs
     from preflight.pairs import PAIRS
 
-    held = json.loads((PAIRS / "held-out" / "pairs.json").read_text())["pairs"]
-    first = sorted({pair[side] for pair in held for side in ("a", "b")})
+    first = []
+    for name in ("held-out", "fresh"):
+        if (path := PAIRS / name / "pairs.json").exists():
+            first += sorted({pair[side] for pair in json.loads(path.read_text())["pairs"]
+                             for side in ("a", "b")} - set(first))
     rows = {row["id"]: row for row in map(json.loads, DATASET.open()) if (OPENINGS / f"{row['id']}.json").exists()}
     return first + sorted({media_id for pair in training_pairs(rows, per_account) for media_id in pair} - set(first))
 

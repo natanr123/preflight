@@ -5,6 +5,7 @@
     uv run modal run -m preflight.finetune --run pairs-luna --describer codex:gpt-6-luna --model glimmer
     uv run modal run -m preflight.finetune --run pairs-luna-3ep --describer codex:gpt-6-luna --model glimmer --epochs 3 --no-baseline
     uv run modal run -m preflight.finetune --run pairs-luna-frames --describer codex:gpt-6-luna --model glimmer --frames --no-baseline
+    uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-spark-1.3:low --model glimmer --no-retrain --no-baseline --test-set fresh
 
 **What it learns.** By default (`--task pairwise`), the pair test's own
 question: two Reels from one account, written down second by second, in; "A"
@@ -18,7 +19,8 @@ Reel got exactly 0.5; the answer token stayed at ln 2 from step 20 on).
 **Held out.** A quarter of the accounts (`preflight.pairs.held_out`) never
 train, so the fine-tune is scored only on accounts it never saw, on the very
 pairs the zero-shot judges take. Glimmer without the adapter takes them too,
-for reference.
+for reference. With `--no-retrain`, `--test-set fresh` scores the saved
+adapter on the second test set instead, into `data/finetune/<run>-fresh.json`.
 
 **First frames.** With `--frames` the model also sees each Reel's first
 frame, just above its written-down opening (`pair_parts`): in the pair test,
@@ -348,17 +350,20 @@ def training_pairs(rows: dict[str, dict], per_account: int) -> list[tuple[str, s
 @app.local_entrypoint()
 def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "tiny", task: str = "pairwise",
          captions: bool = False, frames: bool = False, epochs: float = 1.0, learning_rate: float = 1e-4,
-         per_account: int = 15, baseline: bool = True, retrain: bool = True, limit: int = 0):
+         per_account: int = 15, baseline: bool = True, retrain: bool = True, limit: int = 0,
+         test_set: str = "held-out"):
     from sklearn.metrics import roc_auc_score
 
     from preflight.dataset import OUT as DATASET
     from preflight.pairs import held_out, load_pairs, wilson
 
+    if test_set != "held-out" and retrain:
+        raise ValueError("--test-set scores a saved adapter: add --no-retrain")
     if frames and task != "pairwise":
         raise ValueError("--frames goes with the pairwise task only")
     model_id = MODELS[model]
     texts, rows = reel_texts(describer, captions)
-    test_pairs = [pair for pair in load_pairs("held-out", rows) if pair["a"] in texts and pair["b"] in texts]
+    test_pairs = [pair for pair in load_pairs(test_set, rows) if pair["a"] in texts and pair["b"] in texts]
     smoke = run == "smoke" or limit
 
     def shown(a: str, b: str) -> dict:  # a pair as the model reads it, `a` as Reel A
@@ -416,10 +421,12 @@ def main(run: str = "smoke", describer: str = "codex:gpt-6-luna", model: str = "
                         else judged(score.remote(run, model_id, task, test_items)))
     if baseline:
         results["as it comes"] = judged(score.remote(None, model_id, task, test_items))
-    out = DATASET.parent / "finetune" / f"{run}{'' if retrain else '-rescored'}.json"
+    suffix = ("" if retrain else "-rescored") if test_set == "held-out" else f"-{test_set}"
+    out = DATASET.parent / "finetune" / f"{run}{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"run": run, "model": model_id, "task": task, "describer": describer,
-                               "captions": captions, "frames": frames, "train": trained, **results}, indent=1))
+                               "captions": captions, "frames": frames, "test_set": test_set, "train": trained,
+                               **results}, indent=1))
     for name, result in results.items():
         low, high = result["interval"]
         extra = f"; held-out AUC {result['held_out_auc']:.3f}" if result.get("held_out_auc") is not None else ""

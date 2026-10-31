@@ -24,6 +24,10 @@ drawn once from every such Reel with a video and kept in
 with the same Reel shown first; a judge takes those both sides of which its
 describer wrote down. (`--set sol-sample` is the first, exploratory set: 160
 pairs from the 497 Reels Codex Sol described, held-out accounts or not.)
+`--set fresh` is a second test, drawn on 2026-10-31 from the held-out Reels
+with a video that the first set did not use: 419 pairs from 75 accounts, 53 of
+them in no earlier pair. Its calls are read with the first set's line for sure
+(`levels`), as the demo reads them.
 
 **First frames.** `--first-frames` also shows the judge both Reels' first
 frames, side by side, for what the words may miss of how they look. The
@@ -134,8 +138,11 @@ def build(rows: list[dict]) -> list[dict]:
 def load_pairs(name: str, rows: dict[str, dict]) -> list[dict]:
     path = PAIRS / name / "pairs.json"
     if not path.exists():
-        pairs = build([row for row in rows.values()
-                       if held_out(row["username"]) and video_path(row["id"]).exists()])
+        # A later set (`fresh`) draws only from the Reels the held-out pairs left unused.
+        used = set() if name == "held-out" else {pair[side] for pair in load_pairs("held-out", rows)
+                                                 for side in ("a", "b")}
+        pairs = build([row for row in rows.values() if held_out(row["username"])
+                       and video_path(row["id"]).exists() and row["id"] not in used])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"hold_out": HOLD_OUT, "gap": GAP, "per_account": PER_ACCOUNT,
                                     "pairs": pairs}, indent=1))
@@ -216,8 +223,9 @@ def report(name: str, judge: str, describer: str, captions: bool, frames: bool =
 def tuned_chances(name: str, judge: str) -> dict[tuple[str, str], float]:
     """A fine-tuned judge's (`glimmer:<run>`) chance that Reel A did better,
     pair by pair, from its run, whose chances follow the pairs its describer
-    wrote both Reels of."""
-    result = json.loads((DATASET.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").read_text())
+    wrote both Reels of; another set's are scored apart (`--test-set`)."""
+    scored = judge.split(":", 1)[1] + ("" if name == "held-out" else f"-{name}")
+    result = json.loads((DATASET.parent / "finetune" / f"{scored}.json").read_text())
     described = load_descriptions(result["describer"])
     pairs = [pair for pair in load_pairs(name, {}) if pair["a"] in described and pair["b"] in described]
     tuned = result["tuned"]
@@ -261,9 +269,11 @@ def compare(name: str, judge: str, other: str, describer: str) -> None:
 def levels(name: str, judge: str, other: str, describer: str) -> tuple[float, dict[tuple[str, str], int]]:
     """Which of `LEVELS` a fine-tuned judge's call and another judge's make,
     pair by pair (two answers agree when both are right or both wrong), and the
-    sureness from which the fine-tuned one's call is sure: its median."""
+    sureness from which the fine-tuned one's call is sure: its median on the
+    held-out pairs, the line the demo draws, whichever set is read."""
     chances, mine, theirs = tuned_chances(name, judge), rights(name, judge, describer), rights(name, other, describer)
-    sure_from = sorted(abs(chance - 0.5) for chance in chances.values())[len(chances) // 2]
+    ruler = sorted(abs(chance - 0.5) for chance in tuned_chances("held-out", judge).values())
+    sure_from = ruler[len(ruler) // 2]
     return sure_from, {pair: 2 if mine[pair] == theirs[pair] and abs(chances[pair] - 0.5) >= sure_from
                        else int(mine[pair] == theirs[pair]) for pair in mine.keys() & theirs.keys()}
 
@@ -356,7 +366,7 @@ def main() -> int:
     parser.add_argument("command", choices=["run", "report", "compare", "together"])
     parser.add_argument("--judge", default="codex:gpt-6.1-sol:medium")
     parser.add_argument("--against", help="compare, together: the judge to set against --judge, on the same describer")
-    parser.add_argument("--set", dest="name", default="held-out", help="which pairs (held-out, sol-sample)")
+    parser.add_argument("--set", dest="name", default="held-out", help="which pairs (held-out, fresh, sol-sample)")
     parser.add_argument("--describer", default="codex:gpt-6-luna", help="whose descriptions the judge reads")
     parser.add_argument("--caption", dest="captions", action="store_true", help="show each Reel's caption too")
     parser.add_argument("--first-frames", dest="frames", action="store_true", help="show both first frames too")
