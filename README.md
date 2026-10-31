@@ -20,8 +20,9 @@ on screen, what is said and heard.
 On 207 pairs from 37 accounts no model trained on, fine-tuning takes Glimmer
 from a coin toss (104 right, 50%) to **133 (64%)**, level with Muse Spark
 asked zero-shot (135, 65%). The two are right on different pairs, though:
-**where they agree, they are right 74% of the time, and 81% when Glimmer is
-also sure**; where they disagree, it is a coin toss, and PreFlight says so.
+**where they agree, they are right 74% of the time, and the Reel they pick
+typically got twice the views of the other**; 81% when Glimmer is also sure.
+Where they disagree, it is a coin toss, and PreFlight says so.
 
 ## How it was built
 
@@ -73,7 +74,9 @@ Instagram Graph API ──► labels ──► first 5 s ──► Muse Spark �
 ## Results
 
 Every judge takes the same 207 held-out pairs, from accounts no fine-tune saw.
-50% is a coin toss; with 207 pairs, a result is good to about ±6 points.
+50% is a coin toss. Pairs from one account are not independent, so the 95%
+ranges here come from drawing whole accounts again (`preflight.pairs
+together`): about ±10 points.
 
 | Judge | Right of 207 |
 |---|---|
@@ -82,19 +85,28 @@ Every judge takes the same 207 held-out pairs, from accounts no fine-tune saw.
 | **Muse Glimmer 30B, fine-tuned (2 epochs)** | **133 (64%)** |
 | Muse Spark 1.3, zero-shot | 135 (65%) |
 
-Set pair by pair (`preflight.pairs compare`), the fine-tuned Glimmer alone is
-right on 38 pairs Spark gets wrong, and Spark alone on 40 (McNemar p = 0.91):
-as good as each other, but not the same.
+The fine-tuned Glimmer's range is 54–74%, Spark's 58–72%. Set pair by pair
+(`preflight.pairs compare`), the fine-tuned Glimmer alone is right on 38 pairs
+Spark gets wrong, and Spark alone on 40 (McNemar p = 0.91): as good as each
+other, but not the same.
 
 ### Knowing when it knows
 
 So PreFlight asks both and reads their answers together:
 
-| The two judges | Pairs | Right |
-|---|---|---|
-| Disagree | 78 | 38 (49%) |
-| Agree, Glimmer less sure than on half the pairs | 61 | 40 (66%) |
-| Agree, Glimmer surer | 68 | 55 (81%) |
+| The two judges | Pairs | Right (95% range) | The pick's views, typically |
+|---|---|---|---|
+| Disagree | 78 | 38 (49%, 35–64%) | 1.06x the other's |
+| Agree, Glimmer less sure than on half the pairs | 61 | 40 (66%, 56–76%) | 1.13x |
+| Agree, Glimmer surer | 68 | 55 (81%, 68–91%) | 3.29x |
+| Agree, either way | 129 | 95 (74%, 63–83%) | 1.99x |
+
+Views are each Reel's against its account's usual, and "typically" is the
+geometric mean of the pick's over the other's. Where the two agree, the pick
+got a median 1.59x its account's usual and the Reel passed over 0.72x. Where
+they disagree PreFlight makes no call; that row is what following Glimmer
+anyway would have done. The test pairs are at least 2x apart, so between two
+closer openings a right call gains less.
 
 Asked twice, Spark agrees with itself far more often (175 pairs, with and
 without the first frames), but is then right only 68% of the time: it is two
@@ -184,8 +196,8 @@ uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-s
 
 ## Limitations
 
-- 207 test pairs from 37 accounts: pairs from one account are not
-  independent, so read the intervals as approximate.
+- 207 test pairs from 37 accounts: the ranges, drawn by account, are wide
+  (54–74% for the fine-tuned Glimmer alone).
 - The pairs are at least 2x apart. Between two openings that would do about
   equally well, PreFlight is guessing, and says so when its judges disagree.
 - Only the first five seconds, and only what can be written down: no pacing

@@ -6,6 +6,8 @@ reads their written-down openings.
     uv run python -m preflight.pairs report --judge codex:gpt-6.1-sol:medium --describer codex:gpt-6-luna
     uv run python -m preflight.pairs compare --judge glimmer:pairs-spark --against meta:muse-spark-1.3:medium
                                              --describer meta:muse-spark-1.3:low
+    uv run python -m preflight.pairs together --judge glimmer:pairs-spark --against meta:muse-spark-1.3:medium
+                                              --describer meta:muse-spark-1.3:low
 
 **Why.** It is the product's question: of two openings, which will do better
 for this account? Comparing within one account leaves out what differs between
@@ -36,6 +38,13 @@ written-down opening has only the words and how loud each second is.
 interval (pairs from one account are not quite independent, so read it as
 approximate); 50% is a coin flip. How often it picks whichever came first shows
 any bias for position.
+
+**Together.** `together` reads a fine-tuned judge and another side by side, as
+the demo does (`LEVELS`): how often each is right alone, and where they
+disagree, agree, and agree with the fine-tuned one sure. For each, what the
+picked Reel got against its account's usual next to the one passed over, and
+95% ranges that draw whole accounts again, since pairs from one account are not
+independent.
 """
 import argparse
 import hashlib
@@ -48,6 +57,7 @@ import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from statistics import median
 
 from preflight.dataset import OUT as DATASET
 from preflight.describe import FAILURES, STOPS, as_text, ask, load_descriptions, log
@@ -65,6 +75,10 @@ HOLD_OUT = 4
 GAP = 2
 PER_ACCOUNT = 6
 SEED = 0
+#: With a second judge, the kinds of call, each with its own record: the two
+#: pick different Reels; the same, with the fine-tuned judge less sure than on
+#: half the pairs; the same, and it surer.
+LEVELS = ("disagree", "agree", "agree, sure")
 
 VERDICT = {
     "type": "object",
@@ -244,6 +258,66 @@ def compare(name: str, judge: str, other: str, describer: str) -> None:
         f"{right} of them ({right / max(agree, 1):.0%})")
 
 
+def levels(name: str, judge: str, other: str, describer: str) -> tuple[float, dict[tuple[str, str], int]]:
+    """Which of `LEVELS` a fine-tuned judge's call and another judge's make,
+    pair by pair (two answers agree when both are right or both wrong), and the
+    sureness from which the fine-tuned one's call is sure: its median."""
+    chances, mine, theirs = tuned_chances(name, judge), rights(name, judge, describer), rights(name, other, describer)
+    sure_from = sorted(abs(chance - 0.5) for chance in chances.values())[len(chances) // 2]
+    return sure_from, {pair: 2 if mine[pair] == theirs[pair] and abs(chances[pair] - 0.5) >= sure_from
+                       else int(mine[pair] == theirs[pair]) for pair in mine.keys() & theirs.keys()}
+
+
+def by_account(calls: list[tuple], stat, draws: int = 10_000) -> tuple[float, float]:
+    """A 95% range for `stat` of `calls`, each led by its account, from drawing
+    whole accounts again with replacement."""
+    accounts = defaultdict(list)
+    for call in calls:
+        accounts[call[0]].append(call)
+    rng, names = random.Random(SEED), sorted(accounts)
+    values = sorted(stat([call for account in rng.choices(names, k=len(names)) for call in accounts[account]])
+                    for _ in range(draws))
+    return values[int(0.025 * draws)], values[int(0.975 * draws)]
+
+
+def together(name: str, judge: str, other: str, describer: str) -> None:
+    """A fine-tuned judge and another, alone and read together (`levels`): how
+    often the pick did better, what it got against its account's usual next to
+    the Reel passed over (medians), and typically how many times the other's
+    views (the geometric mean). The pairs are at least `GAP` times apart, so
+    between two closer openings a right call gains less."""
+    rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
+    pairs = {(pair["a"], pair["b"]): pair for pair in load_pairs(name, rows)}
+    sure_from, level = levels(name, judge, other, describer)
+    mine, theirs, ratios = rights(name, judge, describer), rights(name, other, describer), {}
+    for key in level:
+        pair = pairs[key]
+        hit, miss = (pair["a"], pair["b"]) if pair["better"] == "A" else (pair["b"], pair["a"])
+        ratios[key] = pair["account"], rows[hit]["ratio"], rows[miss]["ratio"]
+
+    def calls(right: dict, keys: list) -> list[tuple]:
+        return [(account, right[key], *((up, down) if right[key] else (down, up)))
+                for key in keys for account, up, down in [ratios[key]]]
+
+    def share(some: list[tuple]) -> float:
+        return sum(call[1] for call in some) / len(some)
+
+    def gain(some: list[tuple]) -> float:
+        return math.exp(sum(math.log(call[2] / call[3]) for call in some) / len(some))
+
+    log(f"{name}: {judge} with {other}, reading {describer}; sure from {sure_from:.4f}")
+    for label, right, keys in [(f"{judge} alone", mine, list(level)), (f"{other} alone", theirs, list(level)),
+                               *((kind, mine, [key for key in level if level[key] == n])
+                                 for n, kind in enumerate(LEVELS)),
+                               ("agree, sure or not", mine, [key for key in level if level[key]])]:
+        some = calls(right, keys)
+        (low, high), (least, most) = by_account(some, share), by_account(some, gain)
+        log(f"  {label}: right on {sum(call[1] for call in some)} of {len(some)} = {share(some):.0%} "
+            f"(95% by account: {low:.0%}-{high:.0%}); the pick got {median(call[2] for call in some):.2f}x its "
+            f"usual, the other {median(call[3] for call in some):.2f}x; typically {gain(some):.2f}x the other's "
+            f"views ({least:.2f}x-{most:.2f}x)")
+
+
 def run(name: str, judge: str, describer: str, captions: bool, workers: int, limit: int | None,
         frames: bool = False, sound: bool = False) -> None:
     rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
@@ -279,9 +353,9 @@ def run(name: str, judge: str, describer: str, captions: bool, workers: int, lim
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["run", "report", "compare"])
+    parser.add_argument("command", choices=["run", "report", "compare", "together"])
     parser.add_argument("--judge", default="codex:gpt-6.1-sol:medium")
-    parser.add_argument("--against", help="compare: the judge to set against --judge, on the same describer")
+    parser.add_argument("--against", help="compare, together: the judge to set against --judge, on the same describer")
     parser.add_argument("--set", dest="name", default="held-out", help="which pairs (held-out, sol-sample)")
     parser.add_argument("--describer", default="codex:gpt-6-luna", help="whose descriptions the judge reads")
     parser.add_argument("--caption", dest="captions", action="store_true", help="show each Reel's caption too")
@@ -294,6 +368,8 @@ def main() -> int:
         run(args.name, args.judge, args.describer, args.captions, args.workers, args.limit, args.frames, args.sound)
     elif args.command == "compare":
         compare(args.name, args.judge, args.against, args.describer)
+    elif args.command == "together":
+        together(args.name, args.judge, args.against, args.describer)
     else:
         report(args.name, args.judge, args.describer, args.captions, args.frames, args.sound)
     return 0

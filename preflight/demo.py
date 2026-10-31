@@ -31,7 +31,7 @@ good (133 and 135 of the 207 held-out pairs) but right on different pairs, so
 they were right on 95 of 129 held-out pairs (74%), and on 55 of 68 when
 Glimmer was also surer than on half of them; where they differed, on 38 of 78,
 a coin toss. So the page calls those too close, and quotes each call the
-record of its kind (`LEVELS`).
+record of its kind (`preflight.pairs.LEVELS`).
 
 **Cached.** An opening is kept by its file's hash (`data/demo/<hash>/`),
 with each describer's form, so showing the same videos again costs nothing.
@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from preflight.describe import SECONDS, as_text, ask, log, opening, write_down
-from preflight.pairs import PROMPT, VERDICT, rights, tuned_chances, verdict_path
+from preflight.pairs import LEVELS, PROMPT, VERDICT, levels, rights, tuned_chances, verdict_path
 from preflight.store import DEFAULT_PATH
 from preflight.videos import shrink
 
@@ -62,10 +62,6 @@ CLOSE = 0.1
 #: The held-out pairs in this many equal bands, from the fine-tuned judge's
 #: least sure calls to its surest, each band with its own record.
 BANDS = 4
-#: With a second judge, the kinds of call, each with its own record: the two
-#: pick different Reels; the same, with the fine-tuned judge less sure than on
-#: half the held-out pairs; the same, and it surer.
-LEVELS = ("disagree", "agree", "agree, sure")
 
 EXPLAIN = """\
 Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight {expects}
@@ -207,12 +203,10 @@ def track_record(judge: str, describer: str, second: str | None) -> dict | None:
     record["bands"] = [{"from": band[0][0], "right": sum(hit for _, hit in band), "pairs": len(band)}
                        for band in bands]
     if second:
-        theirs, sure_from = rights("held-out", second, describer), calls[len(calls) // 2][0]
-        levels = [[] for _ in LEVELS]
-        for pair in right.keys() & theirs.keys():  # two answers to a pair agree when both are right or both wrong
-            agree = right[pair] == theirs[pair]
-            levels[2 if agree and abs(chances[pair] - 0.5) >= sure_from else int(agree)].append(right[pair])
-        record |= {"sure_from": sure_from, "levels": [{"right": sum(level), "pairs": len(level)} for level in levels]}
+        sure_from, level = levels("held-out", judge, second, describer)
+        record |= {"sure_from": sure_from,
+                   "levels": [{"right": sum(right[pair] for pair in level if level[pair] == n),
+                               "pairs": sum(level[pair] == n for pair in level)} for n in range(len(LEVELS))]}
     return record
 
 
