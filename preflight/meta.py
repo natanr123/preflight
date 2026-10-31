@@ -42,6 +42,10 @@ TRANSCRIBE_PER_HOUR = 0.18
 #: Caps each answer (reasoning included, which is billed as output), so a
 #: call's worst case is known before it is sent.
 MAX_OUTPUT = 4000
+#: Asks for one answer: now and then the reasoning runs to `MAX_OUTPUT` and the
+#: answer stops short (status "incomplete", or JSON cut off: 5 in about 4,500
+#: calls by 2026-10-31), and asking again has always done it.
+TRIES = 3
 TIMEOUT = 300
 
 
@@ -136,15 +140,19 @@ def respond(model: str, effort: str, prompt: str, schema: dict, image: Path | No
     # The worst case: every input token uncached (an image is under 3,000) and every output token used.
     worst = ((len(prompt) // 2 + (3000 if image else 0)) * PRICES[model]["input"]
              + MAX_OUTPUT * PRICES[model]["output"]) / 1e6
-    with _budget(worst) as settle:
-        reply = _post("responses", json=body)
-        usage = reply.get("usage") or {}
-        settle(token_cost(model, usage))
-    texts = [part["text"] for item in reply.get("output", []) if item.get("type") == "message"
-             for part in item.get("content", []) if part.get("type") == "output_text"]
-    if not texts:
-        raise MetaFailed(f"no answer: status {reply.get('status')}, {json.dumps(reply)[:400]}")
-    return json.loads(texts[-1]), {**usage, "cost_usd": round(token_cost(model, usage), 6)}
+    for _ in range(TRIES):
+        with _budget(worst) as settle:
+            reply = _post("responses", json=body)
+            usage = reply.get("usage") or {}
+            settle(token_cost(model, usage))
+        texts = [part["text"] for item in reply.get("output", []) if item.get("type") == "message"
+                 for part in item.get("content", []) if part.get("type") == "output_text"]
+        try:
+            if texts:
+                return json.loads(texts[-1]), {**usage, "cost_usd": round(token_cost(model, usage), 6)}
+        except json.JSONDecodeError:
+            pass
+    raise MetaFailed(f"no whole answer in {TRIES} tries: status {reply.get('status')}, {json.dumps(reply)[:400]}")
 
 
 def transcribe(wav: bytes, seconds: float) -> dict:
