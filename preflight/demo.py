@@ -1,7 +1,7 @@
 """PreFlight's demo: two openings in; which will do better on the account, and why.
 
     uv run python -m preflight.demo [--describer meta:muse-spark-1.3:low] [--judge glimmer:pairs-spark]
-                                    [--second meta:muse-spark-1.3:medium] [--explainer meta:muse-spark-1.3:medium]
+                                    [--explainer meta:muse-spark-1.3:medium] [--second meta:muse-spark-1.3:medium]
                                     [--port 8008]
 
 **What it does.** You drop in two videos you might post on one account: two
@@ -16,22 +16,22 @@ why and what could lift the other one.
 **Judges.** `glimmer:<run>` is the fine-tuned Muse Glimmer on Modal
 (`preflight.finetune.Judge`, deployed first), reading the describer its
 adapter was trained on. It reads the pair both ways round and averages the
-two, as in its test. Its own probability is not shown: trained to near-zero
-loss, it is all but certain of nearly every pair (162 of 207 held-out pairs at
-99% or more for `pairs-spark`, right on 68% of them). How sure it is still
-ranks its calls, though: split by it into quarters, `pairs-spark` got 25 of 51
-held-out pairs right in its least sure quarter and 38 of 52 in its surest. So
-the page quotes a call the record of the held-out calls about as sure as it
-(`BANDS`). Any other judge is a model asked zero-shot, the way the pair test
-asks it (`preflight.pairs.PROMPT`).
+two, as in its test. It always makes a call. Its own probability is not
+shown: trained to near-zero loss, it is all but certain of nearly every pair.
+How sure it is still ranks its calls, though: on the 626 test pairs of both
+sets (`TESTS`), split by it into quarters, `pairs-spark` was right 60%, 61%,
+65% and 82% of the time. So the page quotes a call the record of the test
+calls in its band: its surest quarter (128 of 157), or the rest (290 of 469)
+(`SURE_QUARTER`). Any other judge is a model asked zero-shot, the way the pair
+test asks it (`preflight.pairs.PROMPT`).
 
-**A second judge.** Glimmer fine-tuned and Muse Spark zero-shot are about as
-good (133 and 135 of the 207 held-out pairs) but right on different pairs, so
-`--second` asks Muse Spark too, alongside. Where the two picked the same Reel
-they were right on 95 of 129 held-out pairs (74%), and on 55 of 68 when
-Glimmer was also surer than on half of them; where they differed, on 38 of 78,
-a coin toss. So the page calls those too close, and quotes each call the
-record of its kind (`preflight.pairs.LEVELS`).
+**A second judge.** `--second` asks a zero-shot judge too, alongside, and calls
+the pair too close where the two disagree. On the first 207 test pairs that
+looked worth it (where Glimmer and Muse Spark agreed, right on 74%; where they
+differed, on 49%), but not on the 419 drawn after: there Glimmer was right on
+68% of the pairs they differed on, and Muse Spark alone on 53%. So by default
+there is none; with one, the page quotes the first set's record by
+`preflight.pairs.LEVELS`.
 
 **Cached.** An opening is kept by its file's hash (`data/demo/<hash>/`),
 with each describer's form, so showing the same videos again costs nothing.
@@ -46,6 +46,7 @@ anyone with the link.
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import sys
@@ -55,21 +56,21 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from preflight.dataset import OUT as DATASET
 from preflight.describe import SECONDS, as_text, ask, log, opening, write_down
-from preflight.pairs import LEVELS, PROMPT, VERDICT, levels, rights, tuned_chances, verdict_path
+from preflight.pairs import LEVELS, PROMPT, VERDICT, levels, load_pairs, rights, tuned_chances, verdict_path
 from preflight.store import DEFAULT_PATH
 from preflight.videos import shrink
 
 DEMO = DEFAULT_PATH.parent / "demo"
 PAGE = Path(__file__).with_name("demo.html")
 SIDES = ("a", "b")
-#: A fine-tuned judge's chance this near a half means its two readings of the
-#: pair contradict each other (each all but certain, the other way round). On
-#: the held-out pairs: 11 of 22 right for `pairs-luna-3ep`, 9 of 13 for `pairs-spark`.
-CLOSE = 0.1
-#: The held-out pairs in this many equal bands, from the fine-tuned judge's
-#: least sure calls to its surest, each band with its own record.
-BANDS = 4
+#: The test pairs a fine-tuned judge's record is read on, those scored so far:
+#: the held-out pairs, and the ones drawn after them (`preflight.pairs`).
+TESTS = ("held-out", "fresh")
+#: Its test calls split here by how sure it was: the rest, and its surest
+#: quarter, each band with its own record.
+SURE_QUARTER = 0.75
 #: Ask for the fine-tuned judge's GPU at most this often, in seconds: a little
 #: less than it stays up idle (`preflight.finetune.Judge`).
 WARM_EVERY = 3 * 60
@@ -151,8 +152,7 @@ def judge(judge: str, forms: dict[str, dict]) -> dict:
         rate = modal.Cls.from_name("preflight", "Judge")(run=judge.split(":", 1)[1]).rate
         a_first, b_first = rate.remote([pair_text(texts, "a", "b"), pair_text(texts, "b", "a")])
         chance = (a_first + 1 - b_first) / 2  # that A does better, read both ways round
-        return {"better": "A" if chance > 0.5 else "B", "close": abs(chance - 0.5) < CLOSE,
-                "sureness": abs(chance - 0.5)}
+        return {"better": "A" if chance > 0.5 else "B", "close": False, "sureness": abs(chance - 0.5)}
     answer, _ = ask(judge, PROMPT.format(captions="", frames="", sound="", a=texts["a"], b=texts["b"]), VERDICT)
     return {"better": answer["better"], "close": False}
 
@@ -197,22 +197,38 @@ def compare(job: str, uploads: dict[str, Path], config: dict) -> None:
 
 
 def track_record(judge: str, describer: str, second: str | None) -> dict | None:
-    """How the judge did on the held-out pairs, for the page to quote: in all,
-    and for a fine-tuned judge, in `BANDS` bands by how sure it was, least sure
-    first, each with the least sureness in it; with a second judge too, by
-    `LEVELS`, with the sureness that makes a call sure."""
+    """How the judge did on the test pairs, for the page to quote. A zero-shot
+    judge on the held-out pairs. A fine-tuned one on every set in `TESTS` it was
+    scored on: in all, and in two bands by how sure it was (`SURE_QUARTER`),
+    each with the least sureness in it and how many times the other's views its
+    pick typically got; with a second judge too, by `LEVELS` on the held-out
+    pairs, with the sureness that makes a call sure."""
     if not judge.startswith("glimmer:"):
         folder = verdict_path("held-out", judge, describer, False, {"a": "", "b": ""}).parent
         records = [json.loads(path.read_text()) for path in folder.glob("*.json")]
         return {"right": sum(record["right"] for record in records), "pairs": len(records)} if records else None
-    if not (DEMO.parent / "finetune" / f"{judge.split(':', 1)[1]}.json").exists():
+    run = judge.split(":", 1)[1]
+    tests = [name for name in TESTS
+             if (DEMO.parent / "finetune" / f"{run}{'' if name == 'held-out' else '-' + name}.json").exists()]
+    if not tests:
         return None
-    chances, right = tuned_chances("held-out", judge), rights("held-out", judge, describer)
-    record = {"right": sum(right.values()), "pairs": len(right)}
-    calls = sorted(((abs(chances[pair] - 0.5), right[pair]) for pair in right), key=lambda call: call[0])
-    bands = [calls[len(calls) * band // BANDS:len(calls) * (band + 1) // BANDS] for band in range(BANDS)]
-    record["bands"] = [{"from": band[0][0], "right": sum(hit for _, hit in band), "pairs": len(band)}
-                       for band in bands]
+    rows = {row["id"]: row for row in map(json.loads, DATASET.open())}
+    calls = []  # how sure, whether right, and the pick's views (against its account's usual) over the other's
+    for name in tests:
+        chances, right = tuned_chances(name, judge), rights(name, judge, describer)
+        for pair in load_pairs(name, rows):
+            if (key := (pair["a"], pair["b"])) in right:
+                gain = rows[pair["a"]]["ratio"] / rows[pair["b"]]["ratio"]
+                calls.append((abs(chances[key] - 0.5), right[key], gain if (chances[key] > 0.5) else 1 / gain))
+    calls.sort()
+
+    def band(name: str, some: list[tuple]) -> dict:
+        return {"name": name, "from": some[0][0], "right": sum(call[1] for call in some), "pairs": len(some),
+                "views": math.exp(sum(math.log(call[2]) for call in some) / len(some))}
+
+    split = int(len(calls) * SURE_QUARTER)
+    record = {"right": sum(call[1] for call in calls), "pairs": len(calls), "tests": tests,
+              "bands": [band("the rest", calls[:split]) | {"from": 0.0}, band("its surest quarter", calls[split:])]}
     if second:
         sure_from, level = levels("held-out", judge, second, describer)
         record |= {"sure_from": sure_from,
@@ -288,9 +304,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--describer", default="meta:muse-spark-1.3:low")
     parser.add_argument("--judge", default="glimmer:pairs-spark")
-    parser.add_argument("--second", default="meta:muse-spark-1.3:medium", help="a zero-shot judge asked alongside; "
-                        "'none' for the judge alone")
     parser.add_argument("--explainer", default="meta:muse-spark-1.3:medium")
+    parser.add_argument("--second", default="none", help="a zero-shot judge asked alongside, such as "
+                        "meta:muse-spark-1.3:medium; 'none' for the judge alone")
     parser.add_argument("--port", type=int, default=8008)
     args = parser.parse_args()
     serve({"describer": args.describer, "judge": args.judge, "second": None if args.second == "none" else args.second,

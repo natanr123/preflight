@@ -281,8 +281,7 @@ function showVerdict(verdict) {
   $('meter').hidden = at < 0;
   if (at >= 0) {
     const share = level => Math.round(100 * level.right / level.pairs);
-    const names = two ? ['judges disagree', 'both agree', 'both agree, sure']
-      : ['least sure', '', '', 'surest'];
+    const names = two ? ['judges disagree', 'both agree', 'both agree, sure'] : levels.map(level => level.name);
     for (const row of [$('bands'), $('band-labels')]) row.style.gridTemplateColumns = `repeat(${levels.length}, 1fr)`;
     $('bands').innerHTML = levels.map((level, index) =>
       `<div class="band${index === at ? ' this' : ''}"><div class="bar" data-share="${share(level)}"><b>${share(level)}%</b></div></div>`
@@ -290,9 +289,11 @@ function showVerdict(verdict) {
     $('band-labels').innerHTML = names.map(name => `<span>${name}</span>`).join('');
     requestAnimationFrame(() => requestAnimationFrame(() =>
       $('bands').querySelectorAll('.bar').forEach(bar => bar.style.height = `${bar.dataset.share}%`)));
-    $('chance').textContent = `Calls ${two ? 'like this one' : 'this sure'} were right ${levels[at].right} of `
-      + `${levels[at].pairs} times (${share(levels[at])}%) on accounts ${two ? 'they' : 'it'} never saw. `
-      + 'A coin toss would be right half the time.';
+    const views = levels[at].views
+      ? ` The Reel it picked typically got ${levels[at].views.toFixed(1)} times the other's views.` : '';
+    $('chance').textContent = `Calls ${!two && at === levels.length - 1 ? 'this sure' : 'like this one'} were right `
+      + `${levels[at].right} of ${levels[at].pairs} times (${share(levels[at])}%) on accounts ${two ? 'they' : 'it'} `
+      + `never saw.${views} A coin toss would be right half the time.`;
   }
   $('why').textContent = verdict.why ?? '…';
   $('lift-head').textContent = `To lift ${other}`;

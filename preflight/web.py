@@ -5,9 +5,9 @@
 
 **What runs where.** One CPU container (`Web`) serves the demo's page and API
 (`preflight.demo.make_app`): ffmpeg cuts each opening, faster-whisper listens,
-and Muse Spark writes it down, judges and explains through the Meta Model API,
-with the key from the Modal secret `preflight-meta`. The fine-tuned Glimmer is
-the GPU judge deployed with `preflight.finetune`. There is only ever one
+and Muse Spark writes it down and explains the call through the Meta Model API,
+with the key from the Modal secret `preflight-meta`. The call is the fine-tuned
+Glimmer's, on the GPU deployed with `preflight.finetune`. There is only ever one
 container, so the jobs and the ledger live in one place, as on the laptop.
 
 **Spending.** Strangers spend the hackathon's credit here. So the demo keeps a
@@ -39,8 +39,8 @@ volume = modal.Volume.from_name("preflight-web", create_if_missing=True)
 KEPT = Path("/ledger")
 USAGE = KEPT / "usage.json"
 RECORD = Path(__file__).resolve().parents[1] / "data" / "demo" / "record.json"
-CONFIG = {"describer": "meta:muse-spark-1.3:low", "judge": "glimmer:pairs-spark",
-          "second": "meta:muse-spark-1.3:medium", "explainer": "meta:muse-spark-1.3:medium"}
+CONFIG = {"describer": "meta:muse-spark-1.3:low", "judge": "glimmer:pairs-spark", "second": None,
+          "explainer": "meta:muse-spark-1.3:medium"}
 #: Dollars of the Meta credit this demo may spend in all: about 400 comparisons.
 LIMIT = 20
 #: Comparisons a day, and wakes of the GPU, without the code.
