@@ -18,6 +18,11 @@ with `?code=`, for the judges), at most `DAILY` comparisons start a day, and
 at most `DAILY` early wake-ups of the GPU, since each keeps it up for minutes;
 a comparison that finds the GPU cold starts it too. Past the comparisons'
 limit the page says so; past the wake-ups', a comparison just waits longer.
+And the month's $30 of Modal credit runs the judge's GPU for the judges too, so
+the public's share of it is capped: each request without the code adds what it
+is likely to cost the GPU (`gpu_cost`: a whole start and idle spell if the GPU
+has gone cold, else the extra time it stays up), and past `PUBLIC_GPU` dollars
+in a month, comparisons without the code stop until the next.
 
 **Nothing kept.** An upload is deleted once its comparison is over; its
 opening (the first seconds, their frames and what was heard) `KEEP` minutes
@@ -49,6 +54,12 @@ DAILY = 20
 KEEP = 15
 #: The most a video may weigh, in bytes; only its first seconds are read.
 LARGEST = 150 << 20
+#: Dollars of the judge's GPU the public may use in a month, by `gpu_cost`'s
+#: estimate: about 60 cold starts, out of the month's $30 of Modal credit.
+PUBLIC_GPU = 12
+#: The judge's GPU in dollars an hour, about how long a cold start takes to
+#: load, and how long it stays up idle after (`preflight.finetune.Judge`).
+GPU_HOURLY, LOAD, IDLE = 2.10, 90, 4 * 60
 NOTICE = (f"A free demo: {DAILY} comparisons a day for everyone. Videos are deleted within {KEEP} minutes; their "
           "frames and the words heard go to Meta's Muse Spark to be written down.")
 
@@ -79,6 +90,14 @@ image = (modal.Image.debian_slim(python_version="3.13")
          .add_local_python_source("preflight", ignore=["**/__pycache__/**"]))
 
 _LOCK = threading.Lock()
+_ASKED = [float("-inf")]  # when the judge's GPU was last asked for, here (the only container)
+
+
+def gpu_cost(now: float) -> float:
+    """What one more request is likely to cost the judge's GPU: a cold start and
+    an idle spell if it has gone cold, else the time it now stays up longer."""
+    since = now - _ASKED[0]
+    return (LOAD + IDLE if since > IDLE else since) / 3600 * GPU_HOURLY
 
 
 def refuse(headers, path: str) -> tuple[int, str] | None:
@@ -90,17 +109,23 @@ def refuse(headers, path: str) -> tuple[int, str] | None:
         return 413, f"Each video can be at most {LARGEST >> 20} MB."
     if meta.left() < 0.25:
         return 429, "The demo has spent its share of the hackathon credit. The video shows it at work."
-    code = os.environ.get("PREFLIGHT_CODE", "")
+    code, now = os.environ.get("PREFLIGHT_CODE", ""), time.monotonic()
     if code and hmac.compare_digest(headers.get("x-preflight-code", "").encode(), code.encode()):
+        _ASKED[0] = now
         return None
     today = str(datetime.now(timezone.utc).date())
     kinds = [today] if path == "/api/compare" else [today, f"{today} warm"]  # no wake once the day's runs are done
+    month = f"{today[:7]} gpu"
     with _LOCK:
         usage = json.loads(USAGE.read_text()) if USAGE.exists() else {}
         if any(usage.get(kind, 0) >= DAILY for kind in kinds):
             return 429, f"Today's {DAILY} free comparisons are used up: come back tomorrow, or watch the video."
+        if usage.get(month, 0) + gpu_cost(now) > PUBLIC_GPU:
+            return 429, "This month's free demo time is used up: the video shows it at work."
         usage[kinds[-1]] = usage.get(kinds[-1], 0) + 1
+        usage[month] = round(usage.get(month, 0) + gpu_cost(now), 4)
         USAGE.write_text(json.dumps(usage))
+        _ASKED[0] = now
     return None
 
 
