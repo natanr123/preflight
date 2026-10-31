@@ -215,6 +215,7 @@ uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-s
   author's own Reels.
 - The Meta Model API is used in standard mode (not contributor mode), on the
   hackathon's credit.
+- The code is under the MIT license (`LICENSE`).
 
 ## Limitations
 
