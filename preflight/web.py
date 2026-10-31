@@ -15,8 +15,9 @@ Meta ledger of its own (`preflight.meta`) on the Volume `preflight-web`, armed
 at `LIMIT` dollars apart from the laptop's $100, which together stay under the
 $150 credit. And without the code in the Modal secret `preflight-web` (a link
 with `?code=`, for the judges), at most `DAILY` comparisons start a day, and
-the GPU is woken at most `DAILY` times, since each wake costs minutes of it.
-Past either, the page says so.
+at most `DAILY` early wake-ups of the GPU, since each keeps it up for minutes;
+a comparison that finds the GPU cold starts it too. Past the comparisons'
+limit the page says so; past the wake-ups', a comparison just waits longer.
 
 **Nothing kept.** An upload is deleted once its comparison is over; its
 opening (the first seconds, their frames and what was heard) `KEEP` minutes
