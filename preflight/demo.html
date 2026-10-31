@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PreFlight</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237c6cff' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M22 2 11 13'/%3E%3Cpath d='M22 2 15 22l-4-9-9-4 20-7Z'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0b0d12; --panel: #131722; --panel-2: #1a1f2c; --line: #262c3b; --text: #e9ecf3; --muted: #8d95a8;
@@ -50,6 +51,7 @@
   button:disabled { opacity: .45; cursor: default; box-shadow: none; }
   #status { text-align: center; color: var(--muted); min-height: 24px; margin: 8px 0 0; }
   #status.failed { color: var(--warn); }
+  #notice { text-align: center; color: var(--muted); font-size: 13px; margin: 2px auto 0; max-width: 640px; }
 
   #verdict { margin-top: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 24px; }
   .headline { font-size: 34px; font-weight: 750; letter-spacing: -0.02em; margin: 0; }
@@ -123,6 +125,7 @@
 
   <div class="actions"><button id="go" disabled>Compare openings</button></div>
   <p id="status"></p>
+  <p id="notice" hidden></p>
 
   <section id="verdict" hidden>
     <p class="headline" id="headline"></p>
@@ -146,7 +149,10 @@
 const SIDES = ['a', 'b'];
 const STAGES = ['waiting', 'cutting', 'listening', 'describing', 'described'];
 const files = {};
-let config = {};
+let config = {}, warmed = false;
+// The hosted demo lets a link with ?code= past its daily limit.
+const code = new URLSearchParams(location.search).get('code');
+const headers = code ? {'X-PreFlight-Code': code} : {};
 const $ = id => document.getElementById(id);
 const slot = side => document.querySelector(`.slot[data-side="${side}"]`);
 const esc = text => String(text ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
@@ -171,10 +177,15 @@ fetch('/api/config').then(reply => reply.json()).then(settings => {
   const second = settings.second ? `, with ${label(settings.second)} as a second judge` : '';
   $('credits').textContent = `Openings written down by ${label(settings.describer)}. Judged by ${label(settings.judge)}`
     + `${second}.${record} Reasons by ${label(settings.explainer)}.`;
+  $('notice').textContent = settings.notice ?? '';
+  $('notice').hidden = !settings.notice;
 });
 
 function choose(side, file) {
   files[side] = file;
+  // Start the judge's GPU now: it takes about a minute, which the openings mostly cover.
+  if (!warmed) fetch('/api/warm', {method: 'POST', headers}).catch(() => {});
+  warmed = true;
   const card = slot(side), video = card.querySelector('video');
   video.src = URL.createObjectURL(file);
   video.play().catch(() => {});
@@ -215,11 +226,13 @@ $('go').addEventListener('click', async () => {
   const body = new FormData();
   for (const side of SIDES) body.append(side, files[side]);
   try {
-    const reply = await fetch('/api/compare', {method: 'POST', body});
-    poll((await reply.json()).job);
+    const reply = await fetch('/api/compare', {method: 'POST', body, headers});
+    const answer = await reply.json().catch(() => ({}));
+    if (!reply.ok) throw new Error(answer.detail ?? reply.statusText);
+    poll(answer.job);
   } catch (error) {
     $('status').className = 'failed';
-    $('status').textContent = `Could not start: ${error}`;
+    $('status').textContent = `Could not start: ${error.message ?? error}`;
     $('go').disabled = false;
   }
 });

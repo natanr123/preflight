@@ -15,10 +15,15 @@ credits" on Billing.
 
 **Not "contributor" mode.** It costs a tenth, but lets Meta train on what is
 sent, and these are other creators' Reels.
+
+**On Modal.** The hosted demo (`preflight.web`) takes the key from the Modal
+secret `preflight-meta`, as `META_API_KEY`, and keeps a ledger of its own at
+`PREFLIGHT_LEDGER`, with its own limit, apart from this laptop's.
 """
 import argparse
 import base64
 import json
+import os
 import sys
 import threading
 from contextlib import contextmanager
@@ -30,7 +35,7 @@ from preflight.store import DEFAULT_PATH
 
 API = "https://api.meta.ai/v1"
 KEY_FILE = Path(__file__).resolve().parents[1] / "secrets" / "meta.env"
-LEDGER = DEFAULT_PATH.parent / "meta_spend.json"
+LEDGER = Path(os.environ.get("PREFLIGHT_LEDGER") or DEFAULT_PATH.parent / "meta_spend.json")
 #: USD per million tokens, standard mode (dev.meta.ai/docs/pricing-rate-limits, 2026-10-29).
 PRICES = {"muse-spark-1.3": {"input": 1.25, "cached": 0.15, "output": 4.25}}
 TRANSCRIBE_PER_HOUR = 0.18
@@ -56,6 +61,8 @@ _LOCK = threading.Lock()
 
 
 def _key() -> str:
+    if key := os.environ.get("META_API_KEY", "").strip():
+        return key
     for line in KEY_FILE.read_text().splitlines():
         name, _, value = line.partition("=")
         if name.strip() == "META_API_KEY" and value.strip():
@@ -151,6 +158,24 @@ def transcribe(wav: bytes, seconds: float) -> dict:
     return reply
 
 
+def arm(limit: float) -> dict:
+    """Let the ledger spend up to `limit` dollars in all, keeping what it has spent."""
+    with _LOCK:
+        ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {"spent_usd": 0.0, "reserved_usd": 0.0,
+                                                                           "calls": 0}
+        ledger["limit_usd"] = limit
+        LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        _write(ledger)
+    return ledger
+
+
+def left() -> float:
+    """Dollars the ledger can still spend; nothing until it is armed."""
+    with _LOCK:
+        ledger = _read() if LEDGER.exists() else {"limit_usd": 0.0, "spent_usd": 0.0, "reserved_usd": 0.0}
+    return ledger["limit_usd"] - ledger["spent_usd"] - ledger["reserved_usd"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -158,11 +183,7 @@ def main() -> int:
     commands.add_parser("spent")
     args = parser.parse_args()
     if args.command == "arm":
-        ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {"spent_usd": 0.0, "reserved_usd": 0.0,
-                                                                           "calls": 0}
-        ledger["limit_usd"] = args.limit
-        LEDGER.parent.mkdir(parents=True, exist_ok=True)
-        _write(ledger)
+        arm(args.limit)
     print(json.dumps(_read(), indent=1))
     return 0
 

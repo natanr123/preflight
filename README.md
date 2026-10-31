@@ -152,6 +152,19 @@ Measured, then left out:
   fine-tuned with QLoRA and served from Modal (`preflight.finetune.Judge`).
 - **Instagram Graph API** (Business Discovery) for the data.
 
+## Try it
+
+**https://natanr123--preflight-web-web-site.us-east.modal.run**
+
+Drop in two videos you might post on one account. The first comparison after
+a quiet spell waits about a minute while the judge's GPU starts; then each
+takes about half a minute. The live demo (`preflight/web.py`) runs on Modal:
+one CPU container for the page, ffmpeg and speech, the fine-tuned Glimmer on
+its GPU, and Muse Spark through the Meta Model API. It spends the hackathon's
+credit, so it keeps its own ledger with a hard limit, and allows 20
+comparisons a day to the public (judges get a link without the daily limit).
+Videos are deleted within 15 minutes.
+
 ## Run it
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), ffmpeg, a Meta Model API
@@ -168,6 +181,15 @@ uv run python -m preflight.demo                     # Muse Spark + glimmer:pairs
 
 Then open http://127.0.0.1:8008 and drop in two videos. The first comparison
 waits about a minute while Modal starts the judge's GPU.
+
+To host it as above, put the key in a Modal secret and deploy the web app:
+
+```bash
+uv run --with python-dotenv modal secret create preflight-meta --from-dotenv secrets/meta.env
+echo "PREFLIGHT_CODE=$(openssl rand -hex 6)" > secrets/web.env  # judges' code
+uv run --with python-dotenv modal secret create preflight-web --from-dotenv secrets/web.env
+uv run modal deploy -m preflight.web
+```
 
 The whole pipeline, from the crawl to the fine-tune (needs an Instagram
 professional account's token in `secrets/ig.env`):

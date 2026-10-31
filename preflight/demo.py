@@ -35,6 +35,13 @@ record of its kind (`preflight.pairs.LEVELS`).
 
 **Cached.** An opening is kept by its file's hash (`data/demo/<hash>/`),
 with each describer's form, so showing the same videos again costs nothing.
+
+**Warm.** The fine-tuned judge's GPU goes cold after four idle minutes and
+takes about a minute to come back, so the page asks for it as soon as a video
+is chosen (`/api/warm`), and it loads while the openings are read.
+
+**On Modal.** `preflight.web` serves the same page and API (`make_app`) to
+anyone with the link.
 """
 import argparse
 import hashlib
@@ -43,6 +50,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -62,6 +70,9 @@ CLOSE = 0.1
 #: The held-out pairs in this many equal bands, from the fine-tuned judge's
 #: least sure calls to its surest, each band with its own record.
 BANDS = 4
+#: Ask for the fine-tuned judge's GPU at most this often, in seconds: a little
+#: less than it stays up idle (`preflight.finetune.Judge`).
+WARM_EVERY = 3 * 60
 
 EXPLAIN = """\
 Two openings for Reels on the same Instagram account are written down below, second by second. PreFlight {expects}
@@ -210,22 +221,29 @@ def track_record(judge: str, describer: str, second: str | None) -> dict | None:
     return record
 
 
-def serve(config: dict, port: int) -> None:
-    import uvicorn
+def make_app(config: dict):
+    """The page and its API, for `config` with its "record" already in."""
     from fastapi import FastAPI, HTTPException, UploadFile
     from fastapi.responses import FileResponse, HTMLResponse
 
-    app = FastAPI(title="PreFlight")
+    app, warmed = FastAPI(title="PreFlight"), [float("-inf")]
 
     @app.get("/", response_class=HTMLResponse)
     def page() -> str:
         return PAGE.read_text()
 
-    config["record"] = track_record(config["judge"], config["describer"], config["second"])
-
     @app.get("/api/config")
     def settings() -> dict:
         return config
+
+    @app.post("/api/warm")
+    def warm() -> dict:
+        if config["judge"].startswith("glimmer:") and time.monotonic() - warmed[0] > WARM_EVERY:
+            import modal
+
+            warmed[0] = time.monotonic()
+            modal.Cls.from_name("preflight", "Judge")(run=config["judge"].split(":", 1)[1]).ping.spawn()
+        return {}
 
     @app.post("/api/compare")
     def start(a: UploadFile, b: UploadFile) -> dict:
@@ -254,9 +272,16 @@ def serve(config: dict, port: int) -> None:
             raise HTTPException(404)
         return FileResponse(DEMO / key / "sheet.jpg")
 
+    return app
+
+
+def serve(config: dict, port: int) -> None:
+    import uvicorn
+
+    config["record"] = track_record(config["judge"], config["describer"], config["second"])
     log(f"PreFlight on http://127.0.0.1:{port} (describer {config['describer']}, judge {config['judge']}, "
         f"second judge {config['second']}, explainer {config['explainer']})")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(make_app(config), host="127.0.0.1", port=port, log_level="warning")
 
 
 def main() -> int:

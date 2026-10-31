@@ -256,11 +256,14 @@ def score(run: str | None, model_id: str, task: str, items: list[str | dict]) ->
     return chances(model, processing, task, items)
 
 
-@app.cls(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=30 * 60, scaledown_window=10 * 60)
+@app.cls(image=image, volumes={"/vol": volume}, gpu=GPUS, memory=32768, timeout=30 * 60, scaledown_window=4 * 60,
+         max_containers=1)
 class Judge:
     """A pairwise adapter kept loaded, for the demo (`preflight.demo`), once
-    deployed (`modal deploy -m preflight.finetune`). It goes cold after ten idle
-    minutes, and the first call after that waits minutes for Glimmer to load."""
+    deployed (`modal deploy -m preflight.finetune`). It goes cold after four idle
+    minutes, and the first call after that waits about a minute for Glimmer to
+    load. Anyone can reach it through the hosted demo, so it is one GPU at most,
+    and goes cold soon."""
     run: str = modal.parameter()
 
     @modal.enter()
@@ -273,6 +276,13 @@ class Judge:
     @modal.method()
     def rate(self, texts: list[str]) -> list[float]:
         return chances(self.model, self.tokenizer, "pairwise", texts)
+
+    @modal.method()
+    def ping(self) -> bool:
+        """Nothing, but a call starts a container, which loads Glimmer: the
+        demo calls it as soon as a video is chosen, to have the judge up by the
+        time both openings are written down."""
+        return True
 
 
 # Local side: the data in, the results out ------------------------------------------------------------------------------
