@@ -168,9 +168,9 @@ a quiet spell waits about a minute while the judge's GPU starts; then each
 takes about half a minute. The live demo (`preflight/web.py`) runs on Modal:
 one CPU container for the page, ffmpeg and speech, the fine-tuned Glimmer on
 its GPU, and Muse Spark through the Meta Model API. It spends the hackathon's
-credit, so it keeps its own ledger with a hard limit, and allows 20
-comparisons a day to the public (judges get a link without the daily limit).
-Videos are deleted within 15 minutes.
+credit, so it keeps its own ledger with a hard limit, and allows the public 20
+comparisons a day within a monthly budget for the GPU (judges get a link
+without either). Videos are deleted within 15 minutes.
 
 ## Run it
 
