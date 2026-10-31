@@ -11,18 +11,15 @@ on screen, what is said and heard.
 
 - **Muse Spark** watches each opening and writes it down, second by second.
 - **Muse Glimmer 30B, fine-tuned** with QLoRA on Modal, reads the two
-  write-ups and picks the one that will do better. **Muse Spark** judges the
-  same pair alongside it.
-- When the two agree, PreFlight says which to post; when they do not, it says
-  the pair is too close to call. **Muse Spark** then says why, and what could
-  lift the other one.
+  write-ups and picks the one that will do better, with how often calls as
+  sure as this one were right in testing.
+- **Muse Spark** then says why, and what could lift the other one.
 
-On 207 pairs from 37 accounts no model trained on, fine-tuning takes Glimmer
-from a coin toss (104 right, 50%) to **133 (64%)**, level with Muse Spark
-asked zero-shot (135, 65%). The two are right on different pairs, though:
-**where they agree, they are right 74% of the time, and the Reel they pick
-typically got twice the views of the other**; 81% when Glimmer is also sure.
-Where they disagree, it is a coin toss, and PreFlight says so.
+On 626 test pairs from 90 accounts no model trained on, drawn in two rounds,
+the fine-tuned Glimmer picks the Reel that did better **67% of the time**,
+against 57% for Muse Spark asked zero-shot (and 50% for Glimmer before
+fine-tuning). **In its surest quarter of calls it is right 82% of the time,
+and the Reel it picks typically got three times the views of the other.**
 
 ## How it was built
 
@@ -30,9 +27,9 @@ Everything below was written during the hackathon (Oct 26 to Nov 4, 2026);
 the git history shows it.
 
 ```
-Instagram Graph API ──► labels ──► first 5 s ──► Muse Spark ──► pairs ──► QLoRA on Modal ──► held-out test
-(Business Discovery)   vs the      10 frames,    writes it      same         Muse Glimmer 30B     207 pairs,
-                       account's   words, loud-  down, second   account,     answers "A" or "B"   37 unseen
+Instagram Graph API ──► labels ──► first 5 s ──► Muse Spark ──► pairs ──► QLoRA on Modal ──► held-out tests
+(Business Discovery)   vs the      10 frames,    writes it      same         Muse Glimmer 30B     626 pairs,
+                       account's   words, loud-  down, second   account,     answers "A" or "B"   90 unseen
                        usual       ness, cuts    by second      ≥2x apart                         accounts
 ```
 
@@ -52,12 +49,15 @@ Instagram Graph API ──► labels ──► first 5 s ──► Muse Spark �
    shots change (ffmpeg).
 4. **Muse Spark writes it down.** `muse-spark-1.3` fills the same form for
    every opening: for each second, what is seen, what text is on screen and
-   what is heard, then the hook. About $0.012 an opening; 4,042 openings.
+   what is heard, then the hook. About $0.012 an opening; 4,042 openings for
+   training and the first test, 605 for the second.
 5. **Pairs within one account** (`preflight/pairs.py`). One Reel that beat
    its account's usual and one that did not, at least 2x apart; closer pairs
    are mostly luck. A quarter of the accounts, picked by a hash of the name,
    never train: 207 test pairs (311 Reels, 37 accounts). Training gets 3,414
-   pairs from 289 other accounts, each shown in both orders.
+   pairs from 289 other accounts, each shown in both orders. Once all else was
+   fixed, a second test was drawn from the held-out Reels the first left
+   unused: 419 pairs (605 Reels) from 75 accounts, 53 of them new.
 6. **Fine-tune Muse Glimmer 30B** (`preflight/finetune.py`). QLoRA after
    Meta's post-training guide for Glimmer (4-bit NF4, r 16, alpha 32, the
    language model's attention projections) with TRL, on one Modal GPU; the
@@ -68,55 +68,61 @@ Instagram Graph API ──► labels ──► first 5 s ──► Muse Spark �
    cancels out.
 8. **Demo** (`preflight/demo.py`). A page that takes two videos and runs the
    same path: cut, listen, Muse Spark writes it down, the fine-tuned Glimmer
-   on Modal and Muse Spark judge side by side, Muse Spark explains. About 26
-   seconds a comparison once the judge's GPU is up.
+   on Modal makes the call, Muse Spark explains. About half a minute a
+   comparison once the judge's GPU is up.
 
 ## Results
 
-Every judge takes the same 207 held-out pairs, from accounts no fine-tune saw.
-50% is a coin toss. Pairs from one account are not independent, so the 95%
-ranges here come from drawing whole accounts again (`preflight.pairs
-together`): about ±10 points.
+Every judge takes the same test pairs, from accounts no fine-tune saw: first
+207 pairs from 37 accounts, then 419 more, drawn once everything else was
+fixed, from 75 accounts (53 of them new). 50% is a coin toss. Pairs from one
+account are not independent, so the 95% ranges come from drawing whole
+accounts again (`preflight.pairs together`).
 
-| Judge | Right of 207 |
-|---|---|
-| Muse Glimmer 30B, as it comes | 104 (50%) |
-| Muse Glimmer 30B, fine-tuned, after 1 epoch | 131 (63%) |
-| **Muse Glimmer 30B, fine-tuned (2 epochs)** | **133 (64%)** |
-| Muse Spark 1.3, zero-shot | 135 (65%) |
-
-The fine-tuned Glimmer's range is 54–74%, Spark's 58–72%. Set pair by pair
-(`preflight.pairs compare`), the fine-tuned Glimmer alone is right on 38 pairs
-Spark gets wrong, and Spark alone on 40 (McNemar p = 0.91): as good as each
-other, but not the same.
-
-### Knowing when it knows
-
-So PreFlight asks both and reads their answers together:
-
-| The two judges | Pairs | Right (95% range) | The pick's views, typically |
+| Judge | First test (207) | Second test (419) | Both (626) |
 |---|---|---|---|
-| Disagree | 78 | 38 (49%, 35–64%) | 1.06x the other's |
-| Agree, Glimmer less sure than on half the pairs | 61 | 40 (66%, 56–76%) | 1.13x |
-| Agree, Glimmer surer | 68 | 55 (81%, 68–91%) | 3.29x |
-| Agree, either way | 129 | 95 (74%, 63–83%) | 1.99x |
+| Muse Glimmer 30B, as it comes | 104 (50%) | | |
+| Muse Glimmer 30B, fine-tuned, after 1 epoch | 131 (63%) | | |
+| **Muse Glimmer 30B, fine-tuned (2 epochs)** | **133 (64%)** | **285 (68%)** | **418 (67%, 61–72%)** |
+| Muse Spark 1.3, zero-shot | 135 (65%) | 222 (53%) | 357 (57%, 52–62%) |
 
-Views are each Reel's against its account's usual, and "typically" is the
-geometric mean of the pick's over the other's. Where the two agree, the pick
-got a median 1.59x its account's usual and the Reel passed over 0.72x. Where
-they disagree PreFlight makes no call; that row is what following Glimmer
-anyway would have done. The test pairs are at least 2x apart, so between two
-closer openings a right call gains less.
+On the first test the two looked level, and right on different pairs: each
+alone got about 40 that the other missed (38 and 40, McNemar p = 0.91). The
+second test, twice the size, settled it. The fine-tuned Glimmer alone was
+right on 117 pairs Muse Spark got wrong, Spark alone on 54 (p < 0.0001), and
+Glimmer held up on the 53 accounts new to the second test (197 of 293, 67%).
+Across both tests, its pick got a median 1.52x its account's usual and the
+Reel passed over 0.76x: typically (the geometric mean) 1.69x the other's
+views.
 
-Asked twice, Spark agrees with itself far more often (175 pairs, with and
-without the first frames), but is then right only 68% of the time: it is two
-different models agreeing that carries the signal.
+### How sure it is
 
 Glimmer's own probability is not worth showing: trained to near-zero loss, it
-is 99% sure or more of 162 of the 207 pairs and right on 68% of those. How sure
-it is still ranks its calls, though: its least sure quarter is right on 25 of
-51 pairs (49%) and its surest on 38 of 52 (73%). So the demo quotes each call
-the record of the held-out calls like it, never a made-up percentage.
+is 99% sure or more of nearly every pair. How sure it is still ranks its
+calls, though. Split into quarters by it, over both tests, it was right 60%,
+61%, 65% and 82% of the time:
+
+| Glimmer's calls | Right (95% range) | The pick's views, typically |
+|---|---|---|
+| Its surest quarter | 128 of 157 (82%, 73–89%) | 3.03x the other's (1.83–5.02x) |
+| The rest | 290 of 469 (62%, 56–67%) | 1.39x (1.03–1.87x) |
+
+So the demo quotes each call the record of its band, never a made-up
+percentage. This held up out of sample: the line for a sure call was drawn on
+the first test (its median sureness), and on the second, the calls past it
+were right on 156 of 209 (75%), those below it on 129 of 210 (61%). Views are
+each Reel's against its account's usual, and the test pairs are at least 2x
+apart, so between two closer openings a right call gains less.
+
+### Two judges, tried and dropped
+
+On the first test, asking Glimmer and Muse Spark together looked like the
+signal: where they agreed they were right on 95 of 129 pairs (74%), where they
+did not on 38 of 78 (49%), so the demo called those pairs too close. The
+second test did not bear it out: where they disagreed, Glimmer was right on
+117 of 171 (68%). Over both, agreement adds little to Glimmer's own sureness
+(Glimmer is right on 70% of the pairs where they agree, 62% where they do
+not), so the demo now lets Glimmer make every call.
 
 ### What did not help
 
@@ -145,11 +151,12 @@ Measured, then left out:
 ## Meta AI used
 
 - **Muse Spark 1.3** through the Meta Model API (`preflight/meta.py`): writes
-  down every opening (low effort), judges each pair zero-shot alongside the
-  fine-tuned Glimmer (medium effort), and explains the verdict. Every call
-  goes through a ledger that refuses anything past the credit.
+  down every opening (low effort), is the zero-shot judge every test is set
+  against (medium effort), and explains the demo's call. Every call goes
+  through a ledger that refuses anything past the credit.
 - **Muse Glimmer 30B** (open weights, `meta-models/Muse-Glimmer-30B`):
-  fine-tuned with QLoRA and served from Modal (`preflight.finetune.Judge`).
+  fine-tuned with QLoRA and served from Modal (`preflight.finetune.Judge`),
+  where it makes the demo's call.
 - **Instagram Graph API** (Business Discovery) for the data.
 
 ## Try it
@@ -203,6 +210,11 @@ uv run python -m preflight.describe prepare
 uv run python -m preflight.describe run --with meta:muse-spark-1.3:low --pairs 15
 uv run python -m preflight.pairs run --judge meta:muse-spark-1.3:medium --describer meta:muse-spark-1.3:low
 uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-spark-1.3:low --model glimmer --epochs 2
+# the second test, drawn once all else is fixed: draw it, write it down, judge it
+uv run python -m preflight.pairs run --set fresh --judge meta:muse-spark-1.3:medium --describer meta:muse-spark-1.3:low
+uv run python -m preflight.describe run --with meta:muse-spark-1.3:low --pairs 0
+uv run python -m preflight.pairs run --set fresh --judge meta:muse-spark-1.3:medium --describer meta:muse-spark-1.3:low
+uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-spark-1.3:low --model glimmer --no-retrain --no-baseline --test-set fresh
 ```
 
 ## Data and rights
@@ -219,11 +231,18 @@ uv run modal run -m preflight.finetune --run pairs-spark --describer meta:muse-s
 
 ## Limitations
 
-- 207 test pairs from 37 accounts: the ranges, drawn by account, are wide
-  (54–74% for the fine-tuned Glimmer alone).
+- 626 test pairs from 90 accounts: the ranges, drawn by account, are still
+  about ±5 points (61–72% for the fine-tuned Glimmer).
 - The pairs are at least 2x apart. Between two openings that would do about
-  equally well, PreFlight is guessing, and says so when its judges disagree.
+  equally well, PreFlight is guessing; it still makes a call, quoting the
+  record of calls as sure.
 - Only the first five seconds, and only what can be written down: no pacing
-  beyond the half-second frames, and no music beyond loudness and words.
+  beyond the half-second frames, no music beyond loudness and words, and not
+  the frame's shape (a landscape and a vertical cut of one opening are written
+  down alike).
 - Professional accounts large enough to be found through mentions; small
-  creators may behave differently.
+  creators may behave differently. On the author's own channel (animated
+  children's stories, 57 followers), Glimmer got 13 of 29 same-story pairs
+  right and Muse Spark 19, and Glimmer was never in its surest quarter there:
+  three stories say little, but it is not the kind of account it learned
+  from.
